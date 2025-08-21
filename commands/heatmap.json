@@ -1,0 +1,257 @@
+{
+  "name": "heatmap",
+  "description": "Configure and generate a bus route heatmap",
+  "options": [
+    {
+      "type": 1,
+      "name": "repository",
+      "description": "Use BRDV's offline repository",
+      "options": [
+        {
+          "name": "year",
+          "description": "Year",
+          "type": 4,
+          "required": true
+        },
+        {
+          "name": "month",
+          "description": "Month",
+          "type": 4,
+          "required": true,
+          "min_value": 1,
+          "max_value": 12
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "datamall",
+      "description": "Configure Datamall settings",
+      "options": [
+        {
+          "type": 1,
+          "name": "default_key",
+          "description": "Use the default Datamall API key"
+        },
+        {
+          "type": 1,
+          "name": "own_key",
+          "description": "Use your own Datamall API key",
+          "options": [
+            {
+              "name": "key",
+              "description": "Your API key",
+              "type": 3,
+              "required": true
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "params",
+          "description": "Set Datamall parameters",
+          "options": [
+            {
+              "name": "year",
+              "description": "Year",
+              "type": 4,
+              "required": true
+            },
+            {
+              "name": "month",
+              "description": "Month",
+              "type": 4,
+              "required": true,
+              "min_value": 1,
+              "max_value": 12
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "filters",
+      "description": "Configure various filters",
+      "options": [
+        {
+          "type": 1,
+          "name": "day_type",
+          "description": "Set the day type filter",
+          "options": [
+            {
+              "name": "type",
+              "description": "Day type",
+              "type": 3,
+              "required": false,
+              "choices": [
+                { "name": "Weekday", "value": "weekday" },
+                { "name": "Weekend / Public Holidays", "value": "weekend_ph" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "time_period",
+          "description": "Set a time period filter",
+          "options": [
+            {
+              "name": "period",
+              "description": "Choose which period",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "Period 1", "value": "period1" },
+                { "name": "Period 2", "value": "period2" },
+                { "name": "Period 3", "value": "period3" },
+                { "name": "Period 4", "value": "period4" }
+              ]
+            },
+            {
+              "name": "time_since",
+              "description": "Since what time?",
+              "type": 4,
+              "required": false,
+              "min_value": 0,
+              "max_value": 23
+            },
+            {
+              "name": "time_until",
+              "description": "Until what time?",
+              "type": 4,
+              "required": false,
+              "min_value": 0,
+              "max_value": 23
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "stop_names",
+      "description": "Configure stop name display",
+      "options": [
+        {
+          "type": 1,
+          "name": "by_bus_service",
+          "description": "Service-based layout",
+          "options": [
+            {
+              "name": "rows",
+              "description": "Include rows",
+              "type": 5,
+              "required": false
+            },
+            {
+              "name": "columns",
+              "description": "Include columns",
+              "type": 5,
+              "required": false
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "by_specific_stops",
+          "description": "Stop-based layout",
+          "options": [
+            {
+              "name": "cells",
+              "description": "Include cells",
+              "type": 5,
+              "required": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "type",
+      "description": "Modify heatmap type settings",
+      "options": [
+        {
+          "type": 1,
+          "name": "by_bus_service",
+          "description": "Route by bus service",
+          "options": [
+            {
+              "name": "bus_svc",
+              "description": "Bus Service",
+              "type": 3,
+              "required": true
+            },
+            {
+              "name": "direction",
+              "description": "Direction",
+              "type": 4,
+              "required": true,
+              "choices": [
+                { "name": "1", "value": 1 },
+                { "name": "2", "value": 2 }
+              ]
+            },
+            {
+              "name": "split_service",
+              "description": "Service split",
+              "type": 3,
+              "required": false,
+              "choices": [
+                { "name": "1st half", "value": "1st half" },
+                { "name": "2nd half", "value": "2nd half" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "by_specific_stops",
+          "description": "Route by specific stops",
+          "options": [
+            {
+              "name": "origin_stops",
+              "description": "Origin stops",
+              "type": 3,
+              "required": true
+            },
+            {
+              "name": "destination_stops",
+              "description": "Destination stops",
+              "type": 3,
+              "required": true
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "set",
+          "description": "Set heatmap type",
+          "options": [
+            {
+              "name": "heatmap_type",
+              "description": "Heatmap type",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "By bus service", "value": "by_bus_svc" },
+                { "name": "By specific stops", "value": "by_specific_stops" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": 1,
+      "name": "check",
+      "description": "Check your settings"
+    },
+    {
+      "type": 1,
+      "name": "generate",
+      "description": "Generate the heatmap with saved settings"
+    }
+  ]
+}

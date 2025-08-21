@@ -1,0 +1,503 @@
+{
+  "name": "guesser",
+  "description": "Update points, view ranks and the leaderboard and also change the settings for the guesser games.",
+  "options": [
+    {
+      "type": 2,
+      "name": "points",
+      "description": "Manage a user's points.",
+      "options": [
+        {
+					"type": 1,
+					"name": "plus",
+					"description": "Add points to a user.",
+					"options": [
+						{
+              "name": "guesser_user",
+              "description": "Target user",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" }
+              ]
+            },
+						{
+              "name": "value",
+              "description": "Amount of points to add, subtract or set",
+              "type": 4,
+              "required": true,
+              "min_value": 0
+            }
+					]
+        },
+				{
+					"type": 1,
+					"name": "minus",
+					"description": "Subtract points from a user.",
+					"options": [
+						{
+              "name": "guesser_user",
+              "description": "Target user",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" }
+              ]
+            },
+						{
+              "name": "value",
+              "description": "Amount of points to add, subtract or set",
+              "type": 4,
+              "required": true,
+              "min_value": 0
+            }
+					]
+				},
+				{
+					"type": 1,
+					"name": "set",
+					"description": "Set points for a user.",
+					"options": [
+						{
+              "name": "guesser_user",
+              "description": "Target user",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" }
+              ]
+            },
+						{
+              "name": "value",
+              "description": "Amount of points to add, subtract or set",
+              "type": 4,
+              "required": true,
+              "min_value": 0
+            }
+					]
+				},
+        {
+					"type": 1,
+					"name": "reset_user",
+					"description": "Reset points for a user for a category or for all categories.",
+					"options": [
+						{
+              "name": "guesser_user",
+              "description": "Target user",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" },
+                { "name": "all categories", "value": "all"}
+              ]
+            }
+					]
+				},
+        {
+					"type": 1,
+					"name": "reset_all",
+					"description": "Reset points for all users for a category or all categories.",
+					"options": [
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" },
+                { "name": "all categories", "value": "all"}
+              ]
+            }
+					]
+				},
+				{
+					"type": 1,
+					"name": "check",
+					"description": "Check your points for a specific category.",
+					"options": [
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" }
+              ]
+            }
+					]
+				},
+				{
+					"type": 1,
+					"name": "check_others",
+					"description": "Check others' points and rank for a specific category or overall.",
+					"options": [
+						{
+              "name": "guesser_user",
+              "description": "Target user",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "type",
+              "description": "Guesser category or overall",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" },
+								{ "name": "overall", "value": "overall" }
+              ]
+            }
+					]
+				},
+				{
+					"type": 1,
+					"name": "leaderboard",
+					"description": "Check the leaderboard for this month for different categories or overall.",
+					"options": [
+						{
+              "name": "type",
+              "description": "Leaderboard type",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" },
+								{ "name": "overall", "value": "overall" }
+              ]
+            }
+					]
+				}
+      ]
+    },
+    {
+      "type": 2,
+      "name": "settings",
+      "description": "Change guesser game settings.",
+      "options": [
+        {
+					"type": 1,
+					"name": "monthly_reset",
+					"description": "Reset points every month, defaults to true.",
+					"options": [
+						{
+              "name": "reset_points",
+              "description": "Are you sure you want to reset points for next month?",
+              "type": 5,
+              "required": false
+            }
+					]
+        },
+				{
+					"type": 1,
+					"name": "announce_leaderboard",
+					"description": "Announce the leaderboard publicly, defaults to false.",
+					"options": [
+						{
+              "name": "public_announce",
+              "description": "Are you sure you want to announce the leaderboard when you run the leaderboard command?",
+              "type": 5,
+              "required": false
+            }
+					]
+        },
+        {
+					"type": 1,
+					"name": "annc_channels",
+					"description": "Announce channels for the various guesser games.",
+					"options": [
+						{
+              "name": "type",
+              "description": "Guesser category",
+              "type": 3,
+              "required": true,
+              "choices": [
+                { "name": "bus_geoguessr", "value": "bus" },
+                { "name": "metro_guesser", "value": "metro" },
+                { "name": "hard metro_guesser", "value": "metro_hard" }
+              ]
+            },
+            {
+              "name": "channel_id",
+              "description": "Announcement channel ID",
+              "type": 3,
+              "required": true
+            }
+					]
+        },
+        {
+					"type": 1,
+					"name": "check",
+					"description": "Check guesser settings"
+        },
+        {
+					"type": 1,
+					"name": "show_leaderboard_until",
+					"description": "Shows the leaderboard until what rank. 0 means up to the 1000th place. Defaults to 10.",
+					"options": [
+						{
+              "name": "rank",
+              "description": "Are you sure you want to reset points for next month?",
+              "type": 4,
+              "required": false,
+              "min_value": 1
+            }
+					]
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "set_answer",
+      "description": "Set the answer for guesser games! Non-team members cannot use this command.",
+      "options": [
+        {
+          "type": 1,
+					"name": "bus_geoguessr",
+					"description": "Set the answer for bus_geoguessr.",
+          "options": []
+        },
+				{
+					"type": 1,
+					"name": "metro_guesser",
+					"description": "Set the answer for metro_guesser.",
+					"options": [
+            {
+              "name": "question_num",
+              "description": "The question number.",
+              "type": 4,
+              "required": true,
+              "min_value": 1
+            },
+						{
+              "name": "city",
+              "description": "The city the line is in.",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "line1",
+              "description": "The short name for the line.",
+              "type": 3,
+              "required": true
+            },
+            {
+              "name": "line_col",
+              "description": "The line colour.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "line2",
+              "description": "The long name for the line.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "consec_length",
+              "description": "How many consecutive words would count as correct. Use 0 to mark whole answer.",
+              "type": 4,
+              "required": false,
+              "min_value": 0
+            },
+            {
+              "name": "threshold",
+              "description": "The similarity threshold(%) for spellchecks. Defaults to 70%.",
+              "type": 4,
+              "required": false,
+              "min_value": 1,
+              "max_value": 100
+            },
+            {
+              "name": "degree",
+              "description": "The rotation degree for Rotated Wednesdays.",
+              "type": 4,
+              "required": false,
+              "min_value": 0,
+              "max_value": 359
+            },
+            {
+              "name": "difficulty",
+              "description": "The question difficulty. Has priority over manual point setting for question.",
+              "type": 3,
+              "required": false,
+              "choices": [
+                {"name": "Easy", "value": "easy"},
+                {"name": "Medium", "value": "medium"},
+                {"name": "Hard", "value": "hard"}
+              ]
+            },
+            {
+              "name": "guess_count",
+              "description": "Maximum number of guesses allowed.",
+              "type": 4,
+              "required": false,
+              "min_value": 1
+            },
+            {
+              "name": "minutes",
+              "description": "Allowed time period to answer the question in minutes.",
+              "type": 4,
+              "required": false,
+              "min_value": 1
+            },
+						{
+              "name": "points",
+              "description": "Amount of points to give for the question.",
+              "type": 4,
+              "required": false,
+              "min_value": 0
+            }
+					]
+				},
+        {
+          "type": 1,
+					"name": "hard_metro_guesser",
+					"description": "Set the answer for hard metro_guesser.",
+          "options": []
+        }
+      ]
+    },
+    {
+      "type": 1,
+      "name": "reset_answer",
+      "description": "Reset the answer to null for a guesser game.",
+      "options": [
+        {
+          "name": "type",
+          "description": "Guesser category",
+          "type": 3,
+          "required": true,
+            "choices": [
+              { "name": "bus_geoguessr", "value": "bus" },
+              { "name": "metro_guesser", "value": "metro" },
+              { "name": "hard metro_guesser", "value": "metro_hard" },
+              { "name": "all guesser games", "value": "all"}
+            ]
+        }
+      ]
+    },
+    {
+      "type": 2,
+      "name": "guess",
+      "description": "Answer guesser games!",
+      "options": [
+        {
+					"type": 1,
+					"name": "bus_geoguessr",
+					"description": "Answer bus_geoguessr questions!.",
+					"options": [
+            {
+              "name": "bus_num",
+              "description": "The bus svc number.",
+              "type": 3,
+              "required": false
+            },
+						{
+              "name": "stop_name",
+              "description": "The bus stop name.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "location",
+              "description": "Location of the bus. Usually road name + somewhere on the road.",
+              "type": 3,
+              "required": false
+            },
+						{
+              "name": "twist",
+              "description": "The twist to the question.",
+              "type": 3,
+              "required": false
+            }
+          ]
+        },
+				{
+					"type": 1,
+					"name": "metro_guesser",
+					"description": "Answer metro_guesser questions!",
+					"options": [
+						{
+              "name": "city",
+              "description": "The city the line is in.",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "line",
+              "description": "The name of the line. Line colour is accepted too.",
+              "type": 3,
+              "required": true
+            },
+            {
+              "name": "degree",
+              "description": "The angle of rotation. Please note that this is the CLOCKWISE turn.",
+              "type": 4,
+              "required": false,
+              "min_value": 1,
+              "max_value": 359
+            }
+					]
+				},
+        {
+					"type": 1,
+					"name": "hard_metro_guesser",
+					"description": "Answer hard metro_guesser questions!",
+					"options": [
+						{
+              "name": "city",
+              "description": "The city the line is in.",
+              "type": 3,
+              "required": true
+            },
+						{
+              "name": "line",
+              "description": "The name of the line. Line colour is accepted too.",
+              "type": 3,
+              "required": true
+            }
+					]
+				}
+      ]
+    }
+  ]
+}

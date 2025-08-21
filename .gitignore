@@ -1,0 +1,4 @@
+/node-modules
+.dockerignore
+error.txt
+.git

@@ -1,0 +1,22 @@
+{
+  "name": "stc-brdv",
+  "version": "1.0.0",
+  "description": "A Discord bot",
+  "main": "scripts/command_functions.js",
+  "scripts": {
+    "start": "pm2-runtime start scripts/ecosystem.config.js",
+    "update-commands": "node scripts/update_commands.js"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.5.1",
+    "body-parser": "^2.2.0",
+    "discord-api-types": "^0.38.1",
+    "discord.js": "^14.19.2",
+    "express": "^5.1.0",
+    "googleapis": "^148.0.0",
+    "node-cron": "^4.0.5",
+    "node-fetch": "^2.7.0",
+    "pm2": "^5.2.0",
+    "unzipper": "^0.12.3"
+  }
+}
