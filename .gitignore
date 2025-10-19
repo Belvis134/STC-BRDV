@@ -5,4 +5,4 @@ info.json
 .git
 .Rproj.user
 discord.Rproj
-drive_auth.json
+!drive_auth.json
