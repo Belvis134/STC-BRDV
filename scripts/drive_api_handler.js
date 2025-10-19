@@ -55,6 +55,7 @@ function run_handler() {
 
 // 6. Prepare a drive object to be directly used
 const drive = google.drive({ version: 'v3', auth: OAuth2_client });
+const sheets = google.sheets({ version: 'v4', auth: OAuth2_client });
 
 // 7. Export run handler function and OAuth2 client
-module.exports = {drive, run_handler, force_refresh};
+module.exports = {drive, sheets, run_handler, force_refresh};

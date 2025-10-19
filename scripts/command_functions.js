@@ -1,19 +1,20 @@
 const express = require('express');
 const body_parser = require('body-parser');
 const cron = require('node-cron')
-const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, admin_id} = require('../config.js');
-const {drive, run_handler} = require('./drive_api_handler.js')
+const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id} = require('../config.js');
+const {drive, sheets, run_handler} = require('./drive_api_handler.js')
 const app = express();
 app.use(body_parser.json());
 app.listen(discord_port, () => {
   console.log(`STC-BRDV listening on port ${discord_port}`);
 });
 
-const { Client, GatewayIntentBits, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, AutoModerationRuleTriggerType} = require('discord.js');
+const { Client, GatewayIntentBits, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, AutoModerationRuleTriggerType, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, Events} = require('discord.js');
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const user_sessions = new Map();
 let copypasta_list = {};
 let guesser_data = {};
+let amendment_data = {amendments:{raw:{},json:{}},users:{}};
 const guesser_settings = {
   monthly_reset: true,
   announce_leaderboard: false,
@@ -21,8 +22,13 @@ const guesser_settings = {
 }
 ;(async function start_handler() {
   await run_handler()
-  copypasta_list = await load_from_drive('copypastas')
-  guesser_data = await load_from_drive('points')
+  copypasta_list = await load_from_drive('copypastas', 'json')
+  guesser_data = await load_from_drive('points', 'json')
+  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet')
+  amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
+  update_recent_amendments()
+  console.log(amendment_data.amendments.json)
+  console.log(amendment_data.amendments.recent)
   for (const [key, val] of Object.entries(guesser_settings)) {
     if (!(key in guesser_data.settings)) {
       guesser_data.settings[key] = val;
@@ -306,23 +312,24 @@ client.on('interactionCreate', async interaction => {
     const subcommand = interaction.options.getSubcommand();
     const restricted_commands = ['plus', 'minus', 'set', 'reset_user', 'reset_all', 'check_others', 'leaderboard']
     const wrapped_user_id = `<@${user_id}>`
+    const admin_ids = [team_id, mg_id]
     if (subcommand_group === 'points' && restricted_commands.includes(subcommand)) {
-      if (!interaction.member.roles.cache.has(admin_id)) {
+      if (!interaction.member.roles.cache.some(role => admin_ids.includes(role.id)) || !interaction.member.roles) {
         return interaction.reply({content: 'This command cannot be used by you. Think you can change your own points, reset points or see the leaderboard before the month ends? Nuh-uh.', ephemeral: true});
       }
     }
     if (subcommand_group === 'settings') {
-      if (!interaction.member.roles.cache.has(admin_id)) {
+      if (!interaction.member.roles.cache.some(admin_ids)) {
         return interaction.reply({content: 'This command cannot be used by you. Think you can change the guesser game settings? Nuh-uh.', ephemeral: true});
       }
     }
     if (subcommand_group === 'set_answer') {
-      if (!interaction.member.roles.cache.has(admin_id)) {
+      if (!interaction.member.roles.cache.some(admin_ids)) {
         return interaction.reply({content: 'This command cannot be used by you. Think you can change the answer of the guesser games? Nuh-uh.', ephemeral: true});
       }
     }
     if (subcommand_group === 'reset_answer') {
-      if (!interaction.member.roles.cache.has(admin_id)) {
+      if (!interaction.member.roles.cache.some(admin_ids)) {
         return interaction.reply({content: 'This command cannot be used by you. Think you can reset the answer of the guesser games? Nuh-uh.', ephemeral: true});
       }
     }
@@ -587,6 +594,42 @@ client.on('interactionCreate', async interaction => {
       }
     }
   }
+
+  // --- Amendment Explorer ---
+  if (interaction.commandName === 'amendment') {
+    const user_id = interaction.user.id;
+    await menu_tab(interaction, user_id)
+  }
+});
+
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isButton()) return;
+  const [action, user_id] = interaction.customId.split('_');
+
+  // Lock to the command invoker
+  if (interaction.user.id !== user_id) {
+    return interaction.reply({ content: 'This UI is not yours to use.', ephemeral: true });
+  }
+
+  if (action === 'help') {
+    await interaction.reply({content: '**How to use Amendment Explorer**\n- Search: Find amendments by bus, user, or type.\n- Modify: Edit or delete your own amendments.\n- Repository Link: View the full Google Sheet.', ephemeral: false});
+  }
+
+  if (action === 'search') {
+    // Trigger your search flow here
+  }
+
+  if (action === 'modify') {
+    modify_tab(interaction, user_id)
+  }
+
+  if (action === 'home_search') {
+
+  }
+
+  if (action === 'home_modify') {
+    
+  }
 });
 
 client.on('messageCreate', message => {
@@ -597,40 +640,69 @@ client.on('messageCreate', message => {
   }
 });
 
-async function load_from_drive(file) {
+async function load_from_drive(file, type) {
   let requested_file_id = ''
+  let range = ''
   if (file === 'copypastas') {requested_file_id = copypastas_file_id}
   if (file === 'points') {requested_file_id = points_file_id}
+  if (file === 'amendments') {requested_file_id = amendments_file_id; range = 'Main Sheet!A:I'}
   try {
-    // Request the copypastas list file content by its file ID.
-    const res = await drive.files.get(
-      { fileId: requested_file_id, alt: 'media' },
-      { responseType: 'stream' }
-    );
-    let data = '';
-    await new Promise((resolve, reject) => {
-      res.data.on('data', (chunk) => data += chunk.toString('utf8'));
-      res.data.on('end', resolve);
-      res.data.on('error', reject);
-    });
-    return JSON.parse(data);
+    // Check for file type.
+    if (type === 'spreadsheet') {
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: requested_file_id, range
+      });
+      return res.data.values;
+    } else if (type === 'json') {
+      // Request the file content by its file ID.
+      const res = await drive.files.get(
+        { fileId: requested_file_id, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      let data = '';
+      await new Promise((resolve, reject) => {
+        res.data.on('data', (chunk) => data += chunk.toString('utf8'));
+        res.data.on('end', resolve);
+        res.data.on('error', reject);
+      });
+      return JSON.parse(data);
+    }
   } catch (error) {
     throw new Error(`Failed to load ${file} from Google Drive: ` + error.message);
   }
 }
 
-async function save_to_drive(type) {
-  let file_id = ''
-  if (type === 'points') {
-    file_id = points_file_id
-    var body = JSON.stringify(guesser_data, null, 2);
-  } if (type === 'copypastas') {
-    file_id = copypastas_file_id
-    var body = JSON.stringify(copypasta_list, null, 2)
+async function save_to_drive(file) {
+  if (file === 'points') {
+    save_json(points_file_id, guesser_data)
+  } if (file === 'copypastas') {
+    save_json(copypastas_file_id, copypasta_list)
+  } if (file === 'amendments') {
+    save_spreadsheet(amendments_file_id, amendment_data.amendments)
   }
+}
+
+async function save_json(file_id, raw_data) {
   await drive.files.update({
     fileId: file_id,
-    media: { mimeType: 'application/json', body }
+    media: {
+      mimeType: 'application/json',
+      body: JSON.stringify(raw_data, null, 2)
+    }
+  });
+}
+
+async function save_spreadsheet(file_id, raw_data) {
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: file_id,
+    range: 'Main Sheet!A1:I',
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [
+        ['Approval', 'Date', 'Contributor', 'Type', 'Service(s)', 'Channel', 'Platform', 'Ref. Number', 'Link'], // Header row
+        [raw_data.rating, raw_data.date, raw_data.user_id, raw_data.amendment_type, raw_data.svcs.join(', '), 'N.A.', raw_data.platform, raw_data.ref_num, raw_data.link] // Data row
+      ]
+    }
   });
 }
 
@@ -1042,6 +1114,157 @@ function levenshtein_coefficient(input_ans, correct_ans) {
   return 1 - (levenshtein_dist/input_ans.length);
 }
 
+function col_names_to_json(raw) {
+  // Skip the first 2 rows (titles/notes), row 3 is headers
+  const headers = raw[2];
+  const dataRows = raw.slice(3);
+
+  // Maps spreadsheet row names to workable JSON parameter names.
+  const json_keys = {
+    'Approval': 'rating',
+    'Date': 'date',
+    'Contributor': 'username',
+    'Type': 'amendment_type',
+    'Service(s)': 'svcs',
+    'Platform': 'platform',
+    'Ref. Number': 'ref_num',
+    'Link': 'link'
+  };
+
+  return dataRows.map(row => {
+    const obj = {};
+    headers.forEach((h, i) => {
+      const key = json_keys[h];
+      if (!key) return; // Skip unmapped columns
+
+      let value = row[i] || '';
+
+      // Normalise types
+      if (key === 'rating') value = value ? Number(value) : null;
+      if (key === 'svcs') value = value ? value.split(',').map(s => s.trim()) : [];
+      if (key === 'amendment_type') value = value ? value.split(',').map(s => s.trim()) : [];
+      if (key === 'date' && value) value = new Date(value).toISOString().split('T')[0];
+
+      obj[key] = typeof value === 'string' ? value.trim() : value;
+    });
+    return obj;
+  });
+}
+
+async function update_recent_amendments() {
+  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet')
+  amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
+  if (!Array.isArray(amendment_data.amendments.json)) {
+    amendment_data.amendments.recent = [];
+    return;
+  }
+
+  // Sort by date descending
+  const sorted = [...amendment_data.amendments.json].sort((a, b) => {
+    const da = new Date(a.date);
+    const db = new Date(b.date);
+    return db - da;
+  });
+
+  // Take top 10
+  amendment_data.amendments.recent = sorted.slice(0, 10);
+}
+
+function amendments_repo_edit(user, routes, params, rating, link) {
+
+}
+
+async function menu_tab(interaction, user_id) {
+  const user_info = amendment_data.users?.[user_id] ?? { total: 0, big: 0 };
+  const amendments = amendment_data.amendments
+
+  const recent = (amendments.json || [])
+    .filter(a => a.recent)
+    .slice(0, 10)
+    .map(a => `• **${a.amendment_type}** on ${a.svcs.join(', ')} by <@${a.user_id}> (${a.date})`)
+    .join('\n') || 'No recent activity.';
+
+  const embed = new EmbedBuilder()
+    .setTitle('🚌 Amendment Explorer')
+    .setDescription(`Welcome to the Amendment Explorer!`)
+    .addFields(
+      { name: 'Your Stats', value: `Total amendments: **${user_info.total}**\nBig amendments: **${user_info.big}**`, inline: true },
+      { name: 'Recent Activity', value: recent }
+    )
+    .setFooter({ text: 'Use the buttons below to navigate.' });
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`help_${user_id}`)
+      .setLabel('Help')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`search_${user_id}`)
+      .setLabel('Search Amendments')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`modify_${user_id}`)
+      .setLabel('Modify Amendments')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setLabel('Repository Link')
+      .setStyle(ButtonStyle.Link)
+      .setURL('https://docs.google.com/spreadsheets/d/1_eQ17i1LbnkGAaZHopSMwsOQCBVVhsper0gwyV132uU/edit')
+  );
+  await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: false });
+}
+
+async function modify_tab(interaction, user_id) {
+  // Filter amendments belonging to this user
+  const user_amendments = amendment_data.amendments.filter(a => a.user_id === user_id);
+
+  const embed = new EmbedBuilder()
+    .setTitle('📝 Modify Your Amendments')
+    .setDescription(user_amendments.length 
+      ? 'Select one of your amendments from the dropdown below.'
+      : 'You have no amendments yet. Use **Add** to create one.');
+
+  // Dropdown menu
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`amendment_select_${user_id}`)
+    .setPlaceholder('Select an amendment')
+    .addOptions(
+      user_amendments.map((a, idx) => ({
+        label: `${a.svcs.join(', ')} — ${a.amendment_type}`,
+        description: `Submitted on ${a.date}`,
+        value: String(idx) // Index in amendment_data.amendments
+      }))
+    );
+
+  // Buttons
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`menu_${user_id}`)
+      .setLabel('Back to Menu')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`add_${user_id}`)
+      .setLabel('Add')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`modify_${user_id}`)
+      .setLabel('Modify')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(user_amendments.length === 0), // Disable if nothing to modify
+    new ButtonBuilder()
+      .setCustomId(`remove_${user_id}`)
+      .setLabel('Remove')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(user_amendments.length === 0)
+  );
+
+  const components = [];
+  if (user_amendments.length > 0) components.push(new ActionRowBuilder().addComponents(menu));
+  components.push(buttons);
+
+  await interaction.update({ embeds: [embed], components, ephemeral: true });
+}
+
 client.login(token);
 client.once('ready', () => {
   console.log(`${client.user.tag} connected to Team STC Discord server!`);
@@ -1060,5 +1283,5 @@ process.on('SIGTERM', () => {
 
 // Keeps the Discord bot alive.
 setInterval(() => {
-  const num = 2+2;
+  update_recent_amendments()
 }, 120000)

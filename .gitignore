@@ -1,6 +1,7 @@
 /node_modules
 .dockerignore
 error.txt
+info.json
 .git
 .Rproj.user
 discord.Rproj

@@ -117,14 +117,16 @@ async function auto_import_datamall() {
 		}
     //  Upload each ZIP into its correct folder
     const drive_responses = await Promise.all(
-      zip_names.map((name, i) =>
-        upload_to_drive(
-          responses[i].body,
+      zip_names.map(async (name, i) => {
+        const arrayBuffer = await responses[i].arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        return upload_to_drive(
+          buffer,
           name,
           'application/zip',
-					type_to_folder_id[zip_types[i]]
-        )
-      )
+          type_to_folder_id[zip_types[i]]
+        );
+      })
     );
     // Update registry with each new ID
     for (let i = 0; i < zip_types.length; i++) {
@@ -168,8 +170,8 @@ async function auto_import_busrouter() {
     const stops_drive = await upload_to_drive(stops_json, stops_name, 'application/json', stops_folder_id);
 
     // Record in registry
-    await update_registry('busrouter', 'services', svc_name,  svc_drive.data.id);
-    await update_registry('busrouter', 'stops',    stops_name, stops_drive.data.id);
+    await update_registry('busrouter', 'services', null, svc_name, svc_drive.data.id);
+    await update_registry('busrouter', 'stops', null, stops_name, stops_drive.data.id);
 
     console.log('Auto-importing from BusRouter complete!');
   } catch (err) {
