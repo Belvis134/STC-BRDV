@@ -1,0 +1,11 @@
+{
+  "name": "verify",
+  "description": "Verifies stuff.",
+  "options": [
+    {
+      "type": 1,
+      "name": "minecraft",
+      "description": "Verifies STC membership in STCraft. You need to be online in MC!"
+    }
+  ]
+}

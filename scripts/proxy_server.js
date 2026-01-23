@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https')
 const url = require('url');
 const fs = require('fs')
 const path = require('path')
@@ -7,8 +8,9 @@ const fetch = require('node-fetch');
 const datamall_proxy = require('./datamall_proxy');
 const {fetch_datamall, fetch_busrouter} = require('./repository_proxy');
 const {auto_import_datamall, auto_import_busrouter} = require('./auto_import');
-const {run_handler, force_refresh} = require('./drive_api_handler')
-const {proxy_port} = require('../config.js')
+const {run_handler, force_refresh} = require('./drive_api_handler');
+const root = 'C:/R Projects/Websites/Bus-Route-Demand-Visualiser/data/storage';
+// const {proxy_port} = require('../config.js')
 const cors_headers = {
   "Access-Control-Allow-Origin": "*", // CORS stuff
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -16,6 +18,39 @@ const cors_headers = {
 };
 const heatmap_folder = path.join(__dirname, 'tmp', 'heatmap');
 fs.mkdirSync(heatmap_folder, { recursive: true });
+const https_options = {
+  key: fs.readFileSync(path.resolve(`${root}/cert/private.key`)),
+  cert: fs.readFileSync(path.resolve(`${root}/cert/fullchain.pem`))
+};
+async function request_handler(req, res) {
+  const { pathname, query } = url.parse(req.url, true);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors_headers);
+    return res.end();
+  }
+  try {
+    if (pathname === '/datamall-proxy') {
+      await datamall_endpoint(req, res, query);
+    } else if (pathname === '/repository/datamall') {
+      await repo_datamall_endpoint(res, query);
+    } else if (pathname === '/repository/busrouter') {
+      await repo_busrouter_endpoint(res, query);
+    } else if (pathname === '/data/discord') {
+      await discord_data_endpoint(res, query);
+    } else if (pathname === '/data/heatmap') {
+      await discord_heatmap_endpoint(res, query);
+    } else if (req.url.startsWith('/.well-known/pki-validation/')) {
+      await post_ssl_verf_file(res, pathname);
+    } else {
+      res.writeHead(404, { "Content-Type": "text/plain", ...cors_headers });
+      res.end('Not found');
+    }
+  } catch (err) {
+    console.error('[Server] Uncaught error', err);
+    res.writeHead(500, { "Content-Type": "text/plain", ...cors_headers });
+    res.end('Internal server error');
+  }
+}
 
 (async function main() {
   // Refresh Drive API token after server starts
@@ -39,35 +74,38 @@ fs.mkdirSync(heatmap_folder, { recursive: true });
   });
 
   // Create & start HTTP server
-  const server = http.createServer(async (req, res) => {
-    const { pathname, query } = url.parse(req.url, true);
-    try {
-      if (pathname === '/datamall-proxy') {
-        await datamall_endpoint(req, res, query);
-      } else if (pathname === '/repository/datamall') {
-        await repo_datamall_endpoint(res, query);
-      } else if (pathname === '/repository/busrouter') {
-        await repo_busrouter_endpoint(res, query);
-      } else if (pathname === '/data/discord') {
-        await discord_data_endpoint(res, query);
-      } else if (pathname === '/data/heatmap') {
-        await discord_heatmap_endpoint(res, query);
-      } else {
-        res.writeHead(404, { "Content-Type": "text/plain", ...cors_headers });
-        res.end('Not found');
-      }
-    } catch (err) {
-      console.error('[server] uncaught error', err);
-      res.writeHead(500, { "Content-Type": "text/plain", ...cors_headers });
-      res.end('Internal server error');
-    }
+  const http_server = http.createServer(async (req, res) => {
+    const host = req.headers.host;
+    res.writeHead(301, { Location: `https://${host}${req.url}`, ...cors_headers });
+    res.end();
+  });
+  http_server.listen(80, '0.0.0.0', () => {
+    console.log(`Datamall proxy server listening on HTTP port 80`);
   });
 
-  // Listen on the Fly-provided port (or fallback to your default)
-  server.listen(proxy_port, '0.0.0.0', () => {
-    console.log(`Datamall proxy server listening on port ${proxy_port}`);
+  // Create & start HTTPS server
+  const https_server = https.createServer(https_options, request_handler)
+  https_server.listen(443, '0.0.0.0', () => {
+    console.log(`Datamall proxy server listening on HTTPS port 443`);
   });
 })();
+
+async function post_ssl_verf_file(res, pathname) {
+  try {
+    const base_dir = path.resolve(root, '.well-known/pki-validation');
+    const file_path = path.resolve(root, '.' + pathname);
+    if (!file_path.toLowerCase().startsWith((base_dir + path.sep).toLowerCase())) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      return res.end('Forbidden');
+    }
+    const content = fs.readFileSync(file_path, 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(content);
+  } catch (err) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end(`Not found: Error: ${err}`);
+  }
+}
 
 // Expose different endpoints for the proxies
 async function datamall_endpoint(req, res, query) {
@@ -232,11 +270,11 @@ async function discord_heatmap_endpoint(req, res) {
     }
 
     // 3. Build the public URL
-    const image_url = `https://stc-brdv.fly.dev/data/heatmap/${image_name}`;
+    const image_url = `https://stcraft.myddns.me/data/heatmap/${image_name}`;
 
     // 4. Notify your bot process via its internal webhook
     try {
-      await fetch('https://stc-brdv-fly.dev/discord/heatmap', {
+      await fetch('https://stcraft.myddns.me/discord/heatmap', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ session_id, image_url, width, height, alt })

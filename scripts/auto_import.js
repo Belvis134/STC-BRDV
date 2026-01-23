@@ -100,7 +100,7 @@ async function auto_import_datamall() {
 		const data_types2 = ['bus', 'train']
 		const zip_names = data_types1b.flatMap(type1 => data_types2.map(type2 => `${type1}_${type2}_${date}.zip`));
 		const zip_types = data_types1b.flatMap(type1 => data_types2.map(type2 => `${type1}_${type2}`));
-    const proxy_urls = data_types1a.flatMap(type1 => data_types2.map(type2 => `https://stc-brdv.fly.dev/datamall-proxy?date=${date}&account_key=${encoded_account_key}&data_type=${type1}&data_type2=${type2}`));
+    const proxy_urls = data_types1a.flatMap(type1 => data_types2.map(type2 => `https://stcraft.myddns.me/datamall-proxy?date=${date}&account_key=${encoded_account_key}&data_type=${type1}&data_type2=${type2}&format=zip`));
 
     console.log(`→ Fetching ZIPs from Datamall`);
     const responses = await Promise.all(proxy_urls.map(u => fetch(u)));

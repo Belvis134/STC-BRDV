@@ -1,5 +1,6 @@
 /node_modules
 .dockerignore
+/scripts/tests
 error.txt
 info.json
 .git
