@@ -9,14 +9,6 @@ module.exports = {
         }
       },
       {
-        name   : "bluey",
-        script : "scripts/command_functions_bluey.js",
-        watch: false,
-        env: {
-          PORT: 336
-        }
-      },
-      {
         name   : "datamall-proxy",
         script : "scripts/proxy_server.js",
         watch : false,
