@@ -555,6 +555,7 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
     console.log(`Created new heatmap sheet for ${metadata.username}`);
   }
   metadata.new_sheet_id = new_sheet_id;
+  metadata.svc_weighing = metadata.service_weighing.toUpperCase()
   // 1b. Some formatting thingies.
   const heatmap_types = {
     "by_bus_svc": "By Bus Service",
@@ -570,6 +571,7 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'username', 0, 2);
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'user_id', 1, 2);
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'heatmap_date', 2, 2);
+  write_to_cell(metadata.requests, metadata, new_sheet_id, 'svc_weighing', 2, 15);
   if (metadata.heatmap_type === 'by_bus_svc' || metadata.heatmap_type === 'by_mrt_line') {
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'service', 0, 7);
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'direction', 1, 7);
