@@ -1,9 +1,10 @@
 const express = require('express');
 const body_parser = require('body-parser');
 const cron = require('node-cron')
-const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id} = require('../config.js');
+const fs = require('fs')
+const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
 const {drive, sheets, run_handler} = require('./drive_api_handler.js')
-const {post_heatmap} = require('./heatmap_generation.js')
+const {post_heatmap, service_weighing} = require('./heatmap_generation.js')
 const app = express();
 app.use(body_parser.json());
 app.listen(discord_port, () => {
@@ -18,7 +19,6 @@ let copypasta_list = {};
 let guesser_data = {};
 let msg_id_repository = {map: {}, order: []};
 let amendment_data = {amendments:{raw:{},json:{}},users:{}};
-let role_info = {}
 const guesser_settings = {
   monthly_reset: true,
   announce_leaderboard: false,
@@ -152,6 +152,7 @@ client.on('interactionCreate', async interaction => {
         session.svc = interaction.options.getString('bus_svc');
         session.dir = interaction.options.getInteger('direction') ?? 1;
         session.split_svc = interaction.options.getString('split_service') ?? "Full route";
+        session.weightage = interaction.options.getBoolean('weightage') ?? false;
         session.by_bus_svc_params_info = `\nBus service: ${session.svc} ${
           (session.split_svc && session.split_svc !== "Full route")
           ? ` ${session.split_svc}`
@@ -164,6 +165,7 @@ client.on('interactionCreate', async interaction => {
         session.svc2 = interaction.options.getString('line_2') ?? session.svc;
         session.dir = interaction.options.getInteger('direction_1') ?? 1;
         session.dir2 = interaction.options.getInteger('direction_2') ?? session.dir;
+        session.weightage = interaction.options.getBoolean('weightage') ?? false;
         session.by_mrt_line_params_info = `\nMRT/LRT line 1: ${session.svc}\n
         MRT/LRT line 2: ${session.svc2}\n
         Direction of line 1: ${session.dir}\n
@@ -186,19 +188,17 @@ client.on('interactionCreate', async interaction => {
         session.by_specific_stop_params_info = `\nOrigin stations: ${session.ori_stops}\nDestination stations: ${session.dst_stops}`
         await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Stations" with parameters:' + session.by_specific_stns_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stop') {
-        session.heatmap_type = "by_specific_stns";
+        session.heatmap_type = "by_specific_stop";
         const ori_stops = interaction.options.getString('stops');
         session.ori_stops = ori_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        session.by_specific_stns_params_info = `\nOrigin stations: ${session.ori_stops}\nDestination stations: ${session.dst_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Stations" with parameters:' + session.by_specific_stns_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stop_params_info = `\nStops: ${session.ori_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific Bus Stop" with parameters:' + session.by_specific_stop_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stn') {
-        session.heatmap_type = "by_specific_stns";
+        session.heatmap_type = "by_specific_stn";
         const ori_stops = interaction.options.getString('stations');
         session.ori_stops = ori_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        const dst_stops = interaction.options.getString('destination_stops');
-        session.dst_stops = dst_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        session.by_specific_stns_params_info = `\nOrigin stations: ${session.ori_stops}\nDestination stations: ${session.dst_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Stations" with parameters:' + session.by_specific_stns_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stn_params_info = `\nStations: ${session.ori_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Station" with parameters:' + session.by_specific_stn_params_info, flags: MessageFlags.Ephemeral });
       }
     } else if (subcommand_group === 'stop_names') {
         await interaction.reply({content: 'This does nothing yet for now lah.', flags: MessageFlags.Ephemeral},)
@@ -271,22 +271,65 @@ client.on('interactionCreate', async interaction => {
           //   : `Cells: ${session.cells}` }`
         ].join('\n')}`, flags: MessageFlags.Ephemeral})
     }
+    else if (subcommand === 'services') {
+      await interaction.deferReply({flags: MessageFlags.Ephemeral});
+      if (!session.datamall_key) {
+        await interaction.editReply({content: 'Where is your Datamall API key? Indicate with either `/heatmap datamall own_key` or `/heatmap datamall default_key` pls.'})
+        return
+      }
+      const ori = interaction.options.getString('origin_stop');
+      const dst = interaction.options.getString('destination_stop');
+      const freq = interaction.options.getString('freq') ?? "avg";
+      try {
+        const data2 = await (await fetch('https://data.busrouter.sg/v1/services.json')).json()
+        const data3 = await (await fetch('https://data.busrouter.sg/v1/stops.json')).json()
+        const data4 = await (await fetch(`https://stcraft.myddns.me/datamall-proxy?data_type=services&data_type2=bus&account_key=${encodeURIComponent(session.datamall_key)}`)).json()
+        const cfm_routes = await service_weighing(data2, data4, ori, dst, freq)
+        let msg = `From ${data3[ori][2]} (${ori}) to ${data3[dst][2]} (${dst}):`
+        for (svc in cfm_routes) {
+          for (dir in cfm_routes[svc]) {
+            if (freq === 'avg') {var freq_msg = 'on average'}
+            else {var freq_msg = `for the ${freq.toUpperCase()} period`}
+            msg = msg + `\n- ${svc} direction ${dir}: ${cfm_routes[svc][dir].diff_dist} km, frequency is ${Number(cfm_routes[svc][dir].freq)} min ${freq_msg}.`
+          }
+        }
+        await interaction.editReply({content: msg})
+      } catch (err) {
+        await interaction.editReply({content: `Somewhere somehow something happened, and you ain't getting your service information...\n${err.name}: ${err.message}`})
+      }
+    }
     else if (subcommand === 'generate') {
       // 1. Defer reply immediately
       await interaction.deferReply();
+      if (!session.datamall_date) {
+        await interaction.editReply({content: 'Where is your Datamall date? Indicate the year/month with `/heatmap datamall params` pls.'})
+        return
+      }
+      if (!session.busrouter_date) {
+        await interaction.editReply({content: 'Where is your BusRouter date? Indicate the year/month with `/heatmap busrouter params` pls.'})
+        return
+      }
+      if (!session.datamall_key) {
+        await interaction.editReply({content: 'Where is your Datamall API key? Indicate with either `/heatmap datamall own_key` or `/heatmap datamall default_key` pls.'})
+        return
+      }
+      if (!session.heatmap_type) {
+        await interaction.editReply({content: 'Where is your heatmap type? Key in your heatmap parameters with `/heatmap type` pls.'})
+        return
+      }
       try {
-        // 2. Delete the user_id key
-        user_sessions.delete(user_id);
+        // // 2. Delete the user_id key
+        // user_sessions.delete(user_id);
 
-        // 3. Create a session_id
-        const session_id = `${user_id}-${Date.now()}`;
-        session.session_id   = session_id;     // new job key
-        session.interaction  = interaction;    // for your callback
-        session.user_id      = user_id;        // keep the ping info
+        // // 3. Create a session_id
+        // const session_id = `${user_id}-${Date.now()}`;
+        // session.session_id   = session_id;  
+        // session.interaction  = interaction;    
+        // session.user_id      = user_id;       
         session.user_profile = client.users.cache.get(user_id) || await client.users.fetch(user_id)
 
-        // 4. Re-store the session under the session_id
-        user_sessions.set(session_id, session);
+        // // 4. Re-store the session under the session_id
+        // user_sessions.set(session_id, session);
         // Encrypt Datamall acc key so that special chars appear
         const encoded_account_key = encodeURIComponent(session.datamall_key)
         // Pack the things nicely
@@ -304,11 +347,12 @@ client.on('interactionCreate', async interaction => {
           heatmap_type: session.heatmap_type,
           datamall_date: session.datamall_date,
           busrouter_date: session.busrouter_date,
+          svc_weighing: session.weightage,
           encoded_account_key
         }
 
         // 5. Run the heatmap generator
-        const response = await post_heatmap(data)
+        const response = await post_heatmap(data, interaction)
 
         // 5. POST the session data (Contains all the params like .svc/.date/.cells/.heatmap_type…)
         // await fetch('https://127.0.0.1/data/discord', {
@@ -675,6 +719,52 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const [action, user_id] = interaction.customId.split('_');
+
+  // Lock to the command invoker
+  if (interaction.user.id !== user_id) {
+    return interaction.reply({ content: 'This UI is not yours to use.', flags: MessageFlags.Ephemeral });
+  }
+
+  if (action === 'help') {
+    await interaction.reply({content: '**How to use Amendment Explorer**\n- Search: Find amendments by bus, user, or type.\n- Modify: Edit or delete your own amendments.\n- Repository Link: View the full Google Sheet.', ephemeral: false});
+  }
+
+  if (action === 'search') {
+    // Trigger your search flow here
+  }
+
+  if (action === 'modify') {
+    modify_tab(interaction, user_id)
+  }
+
+  if (action === 'home_search') {
+
+  }
+
+  if (action === 'home_modify') {
+    
+  }
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'role_select') {
+      const roleId = interaction.values[0];
+      const role = roles.get(roleId);
+
+      if (!role) {
+        return interaction.update({ content: 'Role not found!', components: [] });
+      }
+
+      // Prepare role info
+      const info = `**${role.name}**\n` +
+                   `Permissions: ${role.permissions.toArray().join(', ') || 'None'}\n` +
+                   `Members: ${role.members.map(m => m.user.username).join(', ') || 'None'}`;
+
+      // Update message above dropdown
+      await interaction.update({
+        content: info,
+        components: interaction.message.components // keep dropdown intact
+      });
+    }
+  }
 });
 
 client.on('messageCreate', message => {
@@ -1243,8 +1333,20 @@ async function update_recent_amendments() {
   amendment_data.amendments.recent = sorted.slice(0, 10);
 }
 
-function amendments_repo_edit(user, routes, params, rating, link) {
-
+async function update_data_cache() {
+  const file_path = 'C:/R Projects/Websites/Bus-Route-Demand-Visualiser/data/storage/temp'
+  fs.readdir(file_path, (err, files) => {
+    if (!files) return
+    for (const file of files) {
+      const full_path = `${file_path}/${file}`
+      if (Date.now() - fs.statSync(full_path).mtimeMs > 120 * 60 * 1000) {
+        fs.unlink(full_path, (err) => {
+          if (err) {console.log(err)}
+          else {console.log(`Deleted ${full_path}`)}
+        })
+      }
+    }
+  })
 }
 
 async function menu_tab(interaction, user_id) {
@@ -1356,5 +1458,6 @@ process.on('SIGTERM', () => {
 
 // Keeps the Discord bot alive.
 setInterval(() => {
-  update_recent_amendments()
+  update_recent_amendments();
+  update_data_cache();
 }, 120000)

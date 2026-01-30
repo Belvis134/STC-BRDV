@@ -108,6 +108,40 @@
       ]
     },
     {
+      "type": 1,
+      "name": "services",
+      "description": "Get the services that plies between an origin and destination stop and their frequencies.",
+      "options": [
+        {
+          "name": "origin_stop",
+          "description": "Origin stop code",
+          "type": 3,
+          "required": true
+        },
+        {
+          "name": "destination_stop",
+          "description": "Destination stop code",
+          "type": 3,
+          "required": true
+        },
+        {
+          "name": "freq",
+          "description": "Frequency of the service",
+          "type": 3,
+          "required": false,
+          "choices": [
+            { "name": "Average", "value": "avg" },
+            { "name": "AM Average", "value": "am" },
+            { "name": "PM Average", "value": "pm" },
+            { "name": "AM Peak", "value": "am_peak" },
+            { "name": "PM Peak", "value": "pm_peak" },
+            { "name": "AM Off-peak", "value": "am_offpeak" },
+            { "name": "PM Off-peak", "value": "pm_offpeak" }
+          ]
+        }
+      ]
+    },
+    {
       "type": 2,
       "name": "filters",
       "description": "Configure various filters",
@@ -240,6 +274,12 @@
                 { "name": "1st half", "value": "1st half" },
                 { "name": "2nd half", "value": "2nd half" }
               ]
+            },
+            {
+              "name": "weightage",
+              "description": "Apply service weightage of the total data. This is an approximation.",
+              "type": 5,
+              "required": false
             }
           ]
         },
@@ -304,17 +344,17 @@
         {
           "type": 1,
           "name": "by_specific_stns",
-          "description": "Route by specific stops. Uses origin-destination data.",
+          "description": "Route by specific MRT/LRT stations. Uses origin-destination data.",
           "options": [
             {
               "name": "origin_stations",
-              "description": "Origin stops",
+              "description": "Origin MRT/LRT stations",
               "type": 3,
               "required": true
             },
             {
               "name": "destination_stations",
-              "description": "Destination stops",
+              "description": "Destination MRT/LRT stations",
               "type": 3,
               "required": true
             }

@@ -2,6 +2,14 @@ const { default: fetch } = require('node-fetch');
 const unzipper = require('unzipper');
 const {datamall_api_key_1, datamall_api_key_2} = require('../config.js')
 
+function freq_avg(freq) {
+  let sum = 0
+  freq = freq.split('-');
+  freq.forEach(num => {sum = sum + Number(num)})
+  freq = (sum / freq.length).toFixed(1); 
+  return freq
+}
+
 exports.handler = async function (event) {
   // Handle preflight OPTIONS request
   if (event.httpMethod === "OPTIONS") {
@@ -32,9 +40,9 @@ exports.handler = async function (event) {
     } else if (data_type2 === "train") {
       var datamall_url = `https://datamall2.mytransport.sg/ltaodataservice/PV/Train?Date=${date}`;
     }
-  } else if (data_type === "routes") {
+  } else if (data_type === "services") {
     if (data_type2 === "bus") {
-      var datamall_url = `https://datamall2.mytransport.sg/ltaodataservice/BusRoutes`
+      var datamall_url = `https://datamall2.mytransport.sg/ltaodataservice/BusRoutes and https://datamall2.mytransport.sg/ltaodataservice/BusServices`
     }
   }
 
@@ -180,21 +188,20 @@ exports.handler = async function (event) {
         body: JSON.stringify({ error: error.message })
       };
     }
-  } else if (data_type === "routes") {
+  } else if (data_type === 'services') {
     try {
       let existing_data = {};
       let new_data = [{this_is: "a_placeholder"}];
+      let new_data2 = [{this_is: "a_placeholder"}];
       let skip = 0;
+      const headers = {
+        AccountKey: input_account_key,
+        accept: 'application/json'
+      }
       console.log('Compiling bus route info.')
       while(new_data.length > 0) {
-        const res = await fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusRoutes?$skip=${500*skip}`, {
-          method: "GET",
-          headers: {
-            AccountKey: input_account_key,
-            accept: 'application/json'
-          }
-        });
-        const raw = await res.json()
+        const routes = await  fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusRoutes?$skip=${500*skip}`, {method: "GET", headers: headers});
+        const raw = await routes.json();
         new_data = raw.value
         for (data of new_data) {
           const svc = data.ServiceNo;
@@ -203,53 +210,30 @@ exports.handler = async function (event) {
           const dist = data.Distance;
           const stop_code = data.BusStopCode;
           if (!existing_data[svc]) {existing_data[svc] = {}};
-          if (!existing_data[svc][dir]) {existing_data[svc][dir] = []};
-          existing_data[svc][dir].push([stop_seq, stop_code, dist])
+          if (!existing_data[svc][dir]) {existing_data[svc][dir] = {}};
+          if (!existing_data[svc][dir].routes) {existing_data[svc][dir].routes = []};
+          existing_data[svc][dir].routes.push([stop_seq, stop_code, dist])
         };
         skip++;
       };
-      console.log(`Bus route info compile complete. Maximum skip reached is ${skip-1}*500.`);
-      return {
-        statusCode: 200,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify(existing_data)
-      }
-    } catch (error) {
-      console.error('Error in datamall_proxy:', error);
-      return {
-        statusCode: 500,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify({ error: error.message })
-      };
-    }
-  } else if (data_type === 'services') {
-    try {
-      let existing_data = {};
-      let new_data = [{this_is: "a_placeholder"}];
-      let skip = 0;
-      console.log('Compiling bus service info.')
-      while(new_data.length > 0) {
-        const res = await fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusServices?$skip=${500*skip}`, {
-          method: "GET",
-          headers: {
-            AccountKey: input_account_key,
-            accept: 'application/json'
-          }
-        });
-        const raw = await res.json()
-        new_data = raw.value
-        for (data of new_data) {
+      console.log(`Bus routes info compile complete. Maximum skip reached is ${skip-1}*500.`);
+      skip = 0;
+      while(new_data2.length > 0) {
+        const services = await fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusServices?$skip=${500*skip}`, {method: "GET", headers: headers});
+        const raw = await services.json()
+        new_data2 = raw.value
+        for (data of new_data2) {
           const svc = data.ServiceNo;
           const dir = data.Direction;
           const category = data.Category;
-          const am_peak = data.AM_Peak_Freq;
-          const am_off_peak = data.AM_Offpeak_Freq;
-          const pm_peak = data.PM_Peak_Freq;
-          const pm_off_peak = data.PM_Offpeak_Freq;
-          if (!existing_data[svc]) {existing_data[svc] = {}};
-          if (!existing_data[svc].category) {existing_data[svc].category = category}
-          if (!existing_data[svc][dir]) {existing_data[svc][dir] = []};
-          existing_data[svc][dir].push([am_peak, am_off_peak, pm_peak, pm_off_peak])
+          const am_peak = freq_avg(data.AM_Peak_Freq);
+          const am_off_peak = freq_avg(data.AM_Offpeak_Freq);
+          const pm_peak = freq_avg(data.PM_Peak_Freq);
+          const pm_off_peak = freq_avg(data.PM_Offpeak_Freq);
+          if (!existing_data[svc]) existing_data[svc] = {};
+          if (!existing_data[svc][dir]) existing_data[svc][dir] = {};
+          if (!existing_data[svc].type) {existing_data[svc].type = category};
+          existing_data[svc][dir].freq = [am_peak, am_off_peak, pm_peak, pm_off_peak];
         };
         skip++;
       };
@@ -260,7 +244,7 @@ exports.handler = async function (event) {
         body: JSON.stringify(existing_data)
       }
     } catch (error) {
-      console.error('Error in datamall_proxy:', error);
+      console.error('Error in compiling data:', error);
       return {
         statusCode: 500,
         headers: { "Access-Control-Allow-Origin": "*" },
