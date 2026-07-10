@@ -2,6 +2,7 @@ const {default: fetch} = require('node-fetch');
 const {drive} = require('./drive_api_handler.js');
 const unzipper = require('unzipper')
 const {registry_file_id} = require('../config.js');
+const e = require('express');
 
 async function load_registry() {
   try {
@@ -24,7 +25,7 @@ async function load_registry() {
 
 // Fetch Datamall data from repository
 // Not using a download link for Datamall, instead using Google Drive API
-async function fetch_datamall(datamall_date, data_type, data_type2) {
+async function fetch_datamall(datamall_date, data_type, data_type2, format) {
   const registry = await load_registry();
   const data_type_names = {'origin_destination': 'origin_destination', 'specific_stop': 'transport_node'}
   if (data_type === "origin_destination") {
@@ -32,56 +33,88 @@ async function fetch_datamall(datamall_date, data_type, data_type2) {
   } else if (data_type === "specific_stop") {
     var datamall_file_id = registry.datamall.transport_node[data_type2][`transport_node_${data_type2}_` + datamall_date + '.zip']
   }
+  console.log([registry.datamall.origin_destination[data_type2], datamall_date, data_type2, `origin_destination_${data_type2}_` + datamall_date + '.zip'])
   try {
     const drive_response = await drive.files.get(
       { fileId: datamall_file_id, alt: 'media' },
       { responseType: 'stream' }
     );
     console.log(`ZIP file found for ${data_type_names[data_type]}_${data_type2} for ${datamall_date}.`)
-    return await new Promise((resolve, reject) => {
-      let csv_found = false;
-      drive_response.data
-        .pipe(unzipper.Parse())
-        .on('entry', entry => {
-          const file_name = entry.path;
-          if (file_name.endsWith('.csv')) {
-            csv_found = true;
-            let csv_data = '';
-            entry.on('data', chunk => {
-              csv_data += chunk.toString('utf8');
-            });
-            entry.on('end', () => {
-              resolve({
-                statusCode: 200,
-                headers: {
-                  "Access-Control-Allow-Origin": "*",
-                  "Content-Type": "text/csv"
-                },
-                body: csv_data
+    if (format === 'csv') {
+      return await new Promise((resolve, reject) => {
+        let csv_found = false;
+        drive_response.data
+          .pipe(unzipper.Parse())
+          .on('entry', entry => {
+            const file_name = entry.path;
+            if (file_name.endsWith('.csv')) {
+              csv_found = true;
+              let csv_data = '';
+              entry.on('data', chunk => {
+                csv_data += chunk.toString('utf8');
               });
-            });
-          } else {
-            entry.autodrain();
-          }
-        })
-        .on('close', () => {
-          if (!csv_found) {
-            resolve({
+              entry.on('end', () => {
+                resolve({
+                  statusCode: 200,
+                  headers: {
+                    "Access-Control-Allow-Origin": "*",
+                    "Content-Type": "text/csv"
+                  },
+                  body: csv_data
+                });
+              });
+            } else {
+              entry.autodrain();
+            }
+          })
+          .on('close', () => {
+            if (!csv_found) {
+              resolve({
+                statusCode: 500,
+                headers: { "Access-Control-Allow-Origin": "*" },
+                body: JSON.stringify({ error: "No CSV file found in ZIP... Huh?!" })
+              });
+            }
+          })
+          .on('error', error => {
+            console.error('Stream error:', error);
+            reject({
               statusCode: 500,
               headers: { "Access-Control-Allow-Origin": "*" },
-              body: JSON.stringify({ error: "No CSV file found in ZIP... Huh?!" })
+              body: JSON.stringify({ error: error.message })
             });
-          }
+          });
+      });
+    } else {
+      return await new Promise((resolve, reject) => {
+        const zip_chunks = [];
+        drive_response.data.on('data', chunk => {
+          zip_chunks.push(chunk);
         })
-        .on('error', error => {
-          console.error('Stream error:', error);
+        .on('end', () => {
+          const zip_buffer = Buffer.concat(zip_chunks);
+          resolve({
+            statusCode: 200,
+            headers: {
+              "Access-Control-Allow-Origin": "*",
+              "Content-Type": "application/zip",
+              "Content-Disposition": 'attachment; filename="download.zip"'
+            },
+            body: zip_buffer
+          });
+        })
+        .on("error", err => {
+          console.error("Stream error:", err);
           reject({
             statusCode: 500,
-            headers: { "Access-Control-Allow-Origin": "*" },
-            body: JSON.stringify({ error: error.message })
+            headers: {
+              "Access-Control-Allow-Origin": "*"
+            },
+            body: JSON.stringify({ error: err.message })
           });
         });
-    });
+      });
+    }
   } catch (error) {
     console.error(`Error fetching Datamall data for ${datamall_date}:`, error);
     throw new Error(`There seems to be no Datamall data on the repository for ${datamall_date}: ${error}...`);

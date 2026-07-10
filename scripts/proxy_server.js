@@ -4,11 +4,15 @@ const url = require('url');
 const fs = require('fs')
 const path = require('path')
 const cron = require('node-cron');
+const {Worker} = require('worker_threads');
+const net = require('net');
 const fetch = require('node-fetch');
 const datamall_proxy = require('./datamall_proxy');
 const {fetch_datamall, fetch_busrouter} = require('./repository_proxy');
-const {auto_import_datamall, auto_import_busrouter} = require('./auto_import');
-const {run_handler, force_refresh} = require('./drive_api_handler');
+// const {auto_import_datamall, auto_import_busrouter} = require('./auto_import');
+const {sheets, run_handler, force_refresh} = require('./drive_api_handler');
+const {drive_client_id, drive_client_secret} = require("../config.js")
+const train_info_sheet_id = '1x7s-FRQHRtLbqYigKIy8K_BLiGX8Dnn5OKy7n3SzTqY';
 const root = 'C:/R Projects/Websites/Bus-Route-Demand-Visualiser/data/storage';
 // const {proxy_port} = require('../config.js')
 const cors_headers = {
@@ -22,6 +26,7 @@ const https_options = {
   key: fs.readFileSync(path.resolve(`${root}/cert/private.key`)),
   cert: fs.readFileSync(path.resolve(`${root}/cert/fullchain.pem`))
 };
+let prev_contents = ''
 async function request_handler(req, res) {
   const { pathname, query } = url.parse(req.url, true);
   if (req.method === "OPTIONS") {
@@ -35,6 +40,10 @@ async function request_handler(req, res) {
       await repo_datamall_endpoint(res, query);
     } else if (pathname === '/repository/busrouter') {
       await repo_busrouter_endpoint(res, query);
+    } else if (pathname === '/repository/report-sheet') {
+      await report_sheet(res);
+    } else if (pathname === '/repository/publish-sheet') {
+      await publish_sheet(req, res);
     } else if (pathname === '/data/discord') {
       await discord_data_endpoint(res, query);
     } else if (pathname === '/data/heatmap') {
@@ -52,26 +61,76 @@ async function request_handler(req, res) {
   }
 }
 
+function run_worker(file, workerData = {}) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(file, {workerData});
+    worker.on('message', resolve);
+    worker.on('error', reject);
+    worker.on('exit', (code) => {
+      if (code !== 0)
+        reject(new Error(`Worker stopped with exit code ${code}`));
+    });
+  });
+}
+
 (async function main() {
   // Refresh Drive API token after server starts
   await run_handler();
 
   // Task scheduling
   // Schedule the Datamall fetch to run 5 mins after midnight on the 10th of every month
-  cron.schedule('5 0 10 * *', () => {
+  cron.schedule('5 0 10 * *', async () => {
     console.log("Auto-importing from Datamall started.");
-    auto_import_datamall();
+    try {await run_worker('./worker.js', { task: 'datamall' })}
+    catch (err) {console.error(err)}
   });
   // Schedule the BusRouter fetch to run 5 mins after midnight on the 2nd of every month
-  cron.schedule('5 0 2 * *', () => {
+  cron.schedule('5 0 2 * *', async () => {
     console.log("Auto-importing from BusRouter started.");
-    auto_import_busrouter();
+    try {await run_worker('./worker.js', { task: 'busrouter' })}
+    catch (err) {console.error(err)}
   });
   // Schedule a Drive API token refresh at 00:00 on day 1 of every 4th month
   cron.schedule('0 0 1 */4 *', () => {
     console.log('Quarterly token refresh in progress...');
     force_refresh().catch(console.error);
   });
+  // Schedule regular Datamall train service updates every 5 min
+  cron.schedule('*/1 * * * *', async() => {
+    const full_lines = {BPL: 'BPLRT', STL: 'SKLRT', PTL: 'PGLRT'}
+    try {
+      const new_data = (await (await fetch('https://stcraft.myddns.me/datamall-proxy?account_key=default_key_2&data_type=train_status')).json())[1]
+      const affected_segments = new_data?.AffectedSegments
+      const contents = new_data.Message.map(msg => msg.Content).join('\n\n')
+      if (prev_contents === contents) return;
+      const formatted_new_data = [
+        ((new_data.Message[0].CreatedDate).split(' '))[0],
+        ((new_data.Message[0].CreatedDate).split(' '))[1],
+        affected_segments.length !== 0 ? affected_segments.map(ent => full_lines[ent.Line] ? full_lines[ent.Line] : ent.Line).join('\n') : '#N/A',
+        affected_segments.length !== 0 ? affected_segments.map(ent => update_directions(ent.Line, ent.Direction)).join('\n') : '#N/A',
+        affected_segments.length !== 0 ? await Promise.all(affected_segments.map(async ent => await update_stations(ent.Stations))) : '#N/A',
+        'LTA DATAMALL',
+        contents
+      ]
+      prev_contents = contents
+      const current_data = await (await fetch('https://stcraft.myddns.me/repository/report-sheet')).json()
+      function check(a1, a2) {
+        if (a1.length !== a2.length) return false;
+        for (let i = 0; i < a1.length; i++) if (a1[i] !== a2[i]) return false;
+        return true
+      }
+      if (check(current_data[current_data.length-1], formatted_new_data)) return;
+      const merged_data = [...current_data, formatted_new_data]
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: train_info_sheet_id,
+        range: `Repo!A1`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: merged_data }
+      });
+    } catch (err) {
+      console.error(err)
+    }
+  })
 
   // Create & start HTTP server
   const http_server = http.createServer(async (req, res) => {
@@ -90,6 +149,46 @@ async function request_handler(req, res) {
   });
 })();
 
+function update_directions(line, dir) {
+  dir_list = {
+    'Jurong East': 'NSL-JRB',
+    'Marina South Pier': 'NSL-MRB',
+    'Tuas Link': 'EWL-WB',
+    'Pasir Ris': 'EWL-EB',
+    'Punggol Coast': 'NEL-NB',
+    'Marina Bay': 'CCL-CW',
+    'Clockwise': 'CCL-CW',
+    'Anticlockwise': 'CCL-ACW',
+    'Dhoby Ghaut': 'CCW-CW-DBG',
+    'Bukit Panjang': 'DTL-BPB',
+    'Expo': 'DTL-XPB',
+    'Woodlands North': 'TEL-WLB',
+    'Petir': 'BPLRT-SVA',
+    'Senja': 'BPLRT-SVB',
+    'Renjong': 'SKLRT-WLI',
+    'Cheng Lim': 'SKLRT-WLO',
+    'Compassvale': 'SKLRT-ELI',
+    'Ranggung': 'SKLRT-ELO',
+    'Soo Teck': 'PGLRT-WLI',
+    'Sam Kee': 'PGLRT-WLO',
+    'Damai': 'PGLRT-ELI',
+    'Cove': 'PGLRT-ELO'
+  }
+  dir_list[dir] ? dir = dir_list[dir] : ''
+  if (line.includes('CCL') && dir === 'HarbourFront') dir = 'CCL-CW'
+  if (line.includes('DTL') && dir === 'Sungei Bedok') dir = 'DTL-XPB'
+  if (line.includes('TEL') && dir === 'Sungei Bedok') dir = 'TEL-CGB'
+  return dir
+}
+
+async function update_stations(stns) {
+  stns = stns.split(',')
+  let station_names = undefined
+  if (!station_names) station_names = await(await fetch('https://drive.usercontent.google.com/download?id=1YxK127gaMigZwMfMEsJc9kCRqwMTYK9J&export=download')).json()
+  for (stn of stns) stns[stn] === station_names[stn]
+  return stns.join('\n')
+}
+
 async function post_ssl_verf_file(res, pathname) {
   try {
     const base_dir = path.resolve(root, '.well-known/pki-validation');
@@ -103,7 +202,48 @@ async function post_ssl_verf_file(res, pathname) {
     res.end(content);
   } catch (err) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end(`Not found: Error: ${err}`);
+    res.end(`Not found`);
+  }
+}
+
+async function report_sheet(res) {
+  const spreadsheet = await sheets.spreadsheets.get({spreadsheetId: train_info_sheet_id});
+  try {
+    for (const s of spreadsheet.data.sheets) {
+      const title = s.properties.title;
+      const sheets_res = await sheets.spreadsheets.values.get({
+        spreadsheetId: train_info_sheet_id,
+        range: `${title}!A1:G1000`,
+      });
+      const cell_vals = sheets_res.data.values;
+      res.writeHead(200, { "Content-Type": "application/json", ...cors_headers})
+      res.end(JSON.stringify(cell_vals))
+    }
+  } catch (err) {
+    res.writeHead(500, { "Content-Type": "text/plain", ...cors_headers});
+    res.end(`Internal server error: ${err}`)
+  }
+}
+
+async function publish_sheet(req, res) {
+  try {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', async() => {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: train_info_sheet_id,
+        range: `Repo!A1`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: JSON.parse(body) }
+      });
+    })
+    res.writeHead(200,  { "Content-Type": "text/plain", ...cors_headers});
+    res.end('Sheet updated!')
+  } catch (err) {
+    res.writeHead(500, { "Content-Type": "text/plain", ...cors_headers});
+    res.end(`Internal server error ${err}`)
   }
 }
 
@@ -122,9 +262,9 @@ async function datamall_endpoint(req, res, query) {
 }
 
 async function repo_datamall_endpoint(res, query) {
-  const { datamall_date, data_type, data_type2 } = query;
+  const { datamall_date, data_type, data_type2, format } = query;
   try {
-    var datamall_data = await fetch_datamall(datamall_date, data_type, data_type2);
+    var datamall_data = await fetch_datamall(datamall_date, data_type, data_type2, format);
     res.writeHead(datamall_data.statusCode, { ...datamall_data.headers, ...cors_headers });
     res.end(datamall_data.body);
   } catch (error) {

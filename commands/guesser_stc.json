@@ -293,7 +293,115 @@
           "type": 1,
 					"name": "bus_geoguessr",
 					"description": "Set the answer for bus_geoguessr.",
-          "options": []
+          "options": [
+            {
+              "name": "question_num",
+              "description": "The question number.",
+              "type": 4,
+              "required": true,
+              "min_value": 1
+            },
+            {
+              "name": "accuracy",
+              "description": "The accuracy of the expected answer.",
+              "type": 3,
+              "choices": [
+                {"name": "Bus stop code", "value": "Bus stop code"},
+                {"name": "Bus stop name", "value": "Bus stop name"},
+                {"name": "Bus service", "value": "Bus service"},
+                {"name": "Road name", "value": "Road name"},
+                {"name": "Road names at the junction", "value": "Road names at the junction"}
+              ]
+            },
+ 						{
+              "name": "bus_svc",
+              "description": "The bus service the pictured bus is running.",
+              "type": 3,
+              "required": false
+            },
+						{
+              "name": "road1",
+              "description": "The name of the road the bus is on.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "road2",
+              "description": "The name of the other road at a junction, if required.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "bus_stop_code",
+              "description": "The 5-digit bus stop code.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "twist_ans",
+              "description": "The twist answer.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "twist_desc",
+              "description": "The twist description.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "description",
+              "description": "The description, if the default isn't desired.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "threshold",
+              "description": "The similarity threshold(%) for spellchecks. Defaults to 70%.",
+              "type": 4,
+              "required": false,
+              "min_value": 1,
+              "max_value": 100
+            },
+            {
+              "name": "difficulty",
+              "description": "The question difficulty. Has priority over manual point setting for question.",
+              "type": 3,
+              "required": false,
+              "choices": [
+                {"name": "Easy", "value": "Easy"},
+                {"name": "Medium", "value": "Medium"},
+                {"name": "Hard", "value": "Hard"}
+              ]
+            },
+            {
+              "name": "guess_count",
+              "description": "Maximum number of guesses allowed.",
+              "type": 4,
+              "required": false,
+              "min_value": 1
+            },
+            {
+              "name": "minutes",
+              "description": "Allowed time period to answer the question in minutes. Has priority over difficulty default timings.",
+              "type": 4,
+              "required": false,
+              "min_value": 1
+            },
+						{
+              "name": "points",
+              "description": "Amount of points to give for the question. Default difficulty points overrides this.",
+              "type": 4,
+              "required": false,
+              "min_value": 0
+            },
+            {
+              "name": "submitter",
+              "description": "The submitter of the question.",
+              "type": 3,
+              "required": false
+            }
+          ]
         },
 				{
 					"type": 1,
@@ -312,6 +420,46 @@
               "description": "The city the line is in.",
               "type": 3,
               "required": true
+            },
+            {
+              "name": "region",
+              "description": "The region the city is in.",
+              "type": 3,
+              "required": true,
+              "choices": [
+                {"name": "North America", "value": "North America"},
+                {"name": "Central America", "value": "Central America"},
+                {"name": "South America", "value": "South America"},
+                {"name": "North Europe", "value": "North Europe"},
+                {"name": "West Europe", "value": "West Europe"},
+                {"name": "East Europe", "value": "East Europe"},
+                {"name": "North Africa", "value": "North Africa"},
+                {"name": "Sub-Saharan Africa", "value": "Sub-Saharan Africa"},
+                {"name": "Middle East", "value": "Middle East"},
+                {"name": "South Asia", "value": "South Asia"},
+                {"name": "Central Asia", "value": "Central Asia"},
+                {"name": "North Asia", "value": "North Asia"},
+                {"name": "South Asia", "value": "South Asia"},
+                {"name": "North China", "value": "North China"},
+                {"name": "South China", "value": "South China"},
+                {"name": "East Asia", "value": "East Asia"},
+                {"name": "Southeast Asia", "value": "Southeast Asia"},
+                {"name": "Oceania", "value": "Oceania"},
+                {"name": "Antarctica", "value": "Antarctica"}
+              ]
+            },
+            {
+              "name": "mode",
+              "description": "The transport mode of the line.",
+              "type": 3,
+              "required": true,
+              "choices": [
+                {"name": "Metro", "value": "Metro"},
+                {"name": "Light Rail", "value": "Light Rail"},
+                {"name": "Tram", "value": "Tram"},
+                {"name": "Bus Rapid Transit", "value": "Bus Rapid Transit"},
+                {"name": "Commuter Rail", "value": "Commuter Rail"}
+              ]
             },
 						{
               "name": "line1",
@@ -412,12 +560,12 @@
           "description": "Guesser category",
           "type": 3,
           "required": true,
-            "choices": [
-              { "name": "bus_geoguessr", "value": "bus" },
-              { "name": "metro_guesser", "value": "metro" },
-              { "name": "hard metro_guesser", "value": "metro_hard" },
-              { "name": "all guesser games", "value": "all"}
-            ]
+          "choices": [
+            { "name": "bus_geoguessr", "value": "bus" },
+            { "name": "metro_guesser", "value": "metro" },
+            { "name": "hard metro_guesser", "value": "metro_hard" },
+            { "name": "all guesser games", "value": "all"}
+          ]
         }
       ]
     },
@@ -431,21 +579,33 @@
 					"name": "bus_geoguessr",
 					"description": "Answer bus_geoguessr questions!.",
 					"options": [
-            {
-              "name": "bus_num",
-              "description": "The bus svc number.",
+ 						{
+              "name": "bus_svc",
+              "description": "The bus service the pictured bus is running.",
               "type": 3,
               "required": false
             },
 						{
-              "name": "stop_name",
-              "description": "The bus stop name.",
+              "name": "road1",
+              "description": "The name of the road the bus is on.",
               "type": 3,
               "required": false
             },
             {
-              "name": "location",
-              "description": "Location of the bus. Usually road name + somewhere on the road.",
+              "name": "road2",
+              "description": "The name of the other road at a junction, if required.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "bus_stop_code",
+              "description": "The 5-digit bus stop code.",
+              "type": 3,
+              "required": false
+            },
+            {
+              "name": "bus_stop_name",
+              "description": "The name of the bus stop.",
               "type": 3,
               "required": false
             },
@@ -503,6 +663,24 @@
             }
 					]
 				}
+      ]
+    },
+    {
+      "type": 1,
+      "name": "end_game",
+      "description": "Prematurely ends a guesser game.",
+      "options": [
+        {
+          "name": "game_type",
+          "description": "The game to end.",
+          "type": 3,
+          "required": true,
+          "choices": [
+            {"name": "Bus Geoguessr", "value": "bus"},
+            {"name": "Metroguesser", "value": "metro"},
+            {"name": "Hard Metroguesser", "value": "metro_hard"}
+          ]
+        }
       ]
     }
   ]

@@ -74,6 +74,16 @@
               "required": true,
               "min_value": 1,
               "max_value": 12
+            },
+            {
+              "name": "source",
+              "description": "Source of data. From Datamall or Repository. Defaults to Datamall.",
+              "type": 3,
+              "required": false,
+              "choices": [
+                {"name": "Datamall", "value": "datamall"},
+                {"name": "Repository", "value": "repository"}
+              ]
             }
           ]
         }
@@ -267,7 +277,7 @@
             },
             {
               "name": "split_service",
-              "description": "Service split",
+              "description": "Service split. Does NOT work yet!",
               "type": 3,
               "required": false,
               "choices": [
@@ -280,6 +290,21 @@
               "description": "Apply service weightage of the total data. This is an approximation.",
               "type": 5,
               "required": false
+            },            
+            {
+              "name": "freq",
+              "description": "Frequency of the service. Required if weightage is enabled.",
+              "type": 3,
+              "required": false,
+              "choices": [
+                { "name": "Average", "value": "avg" },
+                { "name": "AM Average", "value": "am" },
+                { "name": "PM Average", "value": "pm" },
+                { "name": "AM Peak", "value": "am_peak" },
+                { "name": "PM Peak", "value": "pm_peak" },
+                { "name": "AM Off-peak", "value": "am_offpeak" },
+                { "name": "PM Off-peak", "value": "pm_offpeak" }
+              ]
             }
           ]
         },
@@ -318,6 +343,27 @@
               "choices": [
                 { "name": "1", "value": 1 },
                 { "name": "2", "value": 2 }
+              ]
+            },
+            {
+              "name": "weightage",
+              "description": "Apply service weightage of the total data. This is an approximation.",
+              "type": 5,
+              "required": false
+            }, 
+            {
+              "name": "freq",
+              "description": "Frequency of the service. Required if weightage is enabled.",
+              "type": 3,
+              "required": false,
+              "choices": [
+                { "name": "Average", "value": "avg" },
+                { "name": "AM Average", "value": "am" },
+                { "name": "PM Average", "value": "pm" },
+                { "name": "AM Peak", "value": "am_peak" },
+                { "name": "PM Peak", "value": "pm_peak" },
+                { "name": "AM Off-peak", "value": "am_offpeak" },
+                { "name": "PM Off-peak", "value": "pm_offpeak" }
               ]
             }
           ]

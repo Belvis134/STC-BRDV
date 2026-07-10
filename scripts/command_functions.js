@@ -2,7 +2,8 @@ const express = require('express');
 const body_parser = require('body-parser');
 const cron = require('node-cron')
 const fs = require('fs')
-const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
+const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id, 
+  bus_geoguessr_folder_id, metro_guesser_folder_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
 const {drive, sheets, run_handler} = require('./drive_api_handler.js')
 const {post_heatmap, service_weighing} = require('./heatmap_generation.js')
 const app = express();
@@ -12,12 +13,14 @@ app.listen(discord_port, () => {
 });
 
 const { Client, GatewayIntentBits, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags, 
-  AutoModerationRuleTriggerType, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, Events} = require('discord.js');
+  AutoModerationRuleTriggerType, AttachmentBuilder, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, Events} = require('discord.js');
+const { format } = require('path');
+const { wrap } = require('module');
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const user_sessions = new Map();
 let copypasta_list = {};
 let guesser_data = {};
-let msg_id_repository = {map: {}, order: []};
+let msg_id_repository = {map: {}, order: [], channels: {}};
 let amendment_data = {amendments:{raw:{},json:{}},users:{}};
 const guesser_settings = {
   monthly_reset: true,
@@ -50,6 +53,29 @@ const guesser_settings = {
     timezone: 'Asia/Singapore'
   });
 
+  // Ends a bus_geoguessr game
+  // setInterval(async () => {
+  //   try {
+  //     const now = Date.now();
+  //     const bus = guesser_data.answer.bus;
+  //     const durations = {
+  //         "easy": 15 * 60 * 1000, // 15 min
+  //         "medium": 30 * 60 * 1000, // 30 min
+  //         "hard": 60 * 60 * 1000 // 60 min
+  //     };
+  //     if (guesser_data.answer.bus.time_period !== null) {
+  //       var duration = guesser_data.answer.bus.time_period
+  //     } else {
+  //       var duration = durations[bus.difficulty]
+  //     }
+  //     if (bus.timestamp && now - bus.timestamp >= duration) {
+  //       await announce_and_reset_answer('metro', guesser_data.settings.announcements.bus);
+  //     }
+  //   } catch (err) {
+  //     console.error('bus_geoguessr round failed to automatically end due to:', err);
+  //   }
+  // }, 1 * 60 * 1000);
+
   // Ends a metro_guesser game
   setInterval(async () => {
     try {
@@ -66,7 +92,7 @@ const guesser_settings = {
         var duration = durations[metro.difficulty]
       }
       if (metro.timestamp && now - metro.timestamp >= duration) {
-        announce_and_reset_answer('metro', guesser_data.settings.announcements.metro);
+        await announce_and_reset_answer('metro', guesser_data.settings.announcements.metro);
       }
     } catch (err) {
       console.error('metro_guesser round failed to automatically end due to:', err);
@@ -97,6 +123,114 @@ app.post('/discord/heatmap', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+app.post('/btc-message', async (req, res) => {
+  let replied_bot_msg_id = null;
+  let ref_type = 'normal';
+  let files = [];
+  let embeds = [];
+  let thread;
+  // Params
+  const {sender_name, sender_pfp_url, content, channel_name, channel_id, channel_type, attachments, msg_id, ref_msg_id, ref_channel_id, ref_channel_name, ref_guild_name, 
+    ref_guild_icon, ref_author, ref_author_pfp_url, ref_content, ref_attachments, parent_id, parent_type, parent_name} = req.body;
+  // Guild and channel assignment
+  const guild = await client.guilds.fetch(discord_guild_id);
+  const channel = await guild.channels.fetch(msg_relay_id);
+  // Reply vs Forward
+  if (ref_channel_id) {ref_type = 'reply'} 
+  else if (ref_content) {ref_type = 'forward'}
+  // Attachments
+  if (attachments && attachments.length > 0) {
+    files.push(...attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
+  }
+  if (ref_attachments && ref_attachments.length > 0) {
+    files.push(...ref_attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
+  }
+  // Reply mapping and order
+  if (ref_type === 'reply' && msg_id_repository.map[ref_msg_id]) {
+    replied_bot_msg_id = {
+      messageReference: msg_id_repository.map[ref_msg_id]
+    };
+  } else replied_bot_msg_id = null
+  if (!msg_id_repository.map[msg_id]) {
+    msg_id_repository.order.push(msg_id);
+    if (msg_id_repository.order.length > 200) {
+      const oldest = msg_id_repository.order.shift();
+      delete msg_id_repository.map[oldest];
+    }
+  }
+  // Embed building
+  const embed = new EmbedBuilder()
+    .setDescription(content ? content : ' ')
+    .setAuthor({name: sender_name, iconURL: sender_pfp_url});
+  if (ref_type === 'forward') {
+    const embed_2 = new EmbedBuilder()
+      .setDescription(ref_content ? ref_content : ' ')
+      .setAuthor({name: ref_author, iconURL: ref_author_pfp_url})
+      .setFooter({text: `Forwarded from #${ref_channel_name} in ${ref_guild_name}`, iconURL: ref_guild_icon});
+    embeds.push(embed_2)
+  }
+  embeds.push(embed)
+  // Consider parent and current channel types. Type 4 is category.
+  let tag_id; let name;
+  switch (parent_type) {
+    case 0: case 5: tag_id = '1468615615555047571'; break; // Normal thread
+    case 15: tag_id = '1468615301917708485'; break; // Forum thread
+    case 4: switch (channel_type) {
+      case 0: tag_id = '1468614956105728114'; break; // Text channel
+      case 2: tag_id = '1468819935437525259'; break; // Voice channel
+      case 5: tag_id = '1468798513893740718'; break; // Announcement channel
+    }; break;
+  }
+  switch (parent_type) {
+    case 0: case 5: case 15: name = `${parent_name}/${channel_name}`; break;
+    case 4: name = channel_name; break;
+  }
+  // Active vs Archived
+  const active = await channel.threads.fetchActive();
+  const archived = await channel.threads.fetchArchived();
+  if (!msg_id_repository.channels) msg_id_repository.channels = {}
+  thread = active.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]) 
+        || archived.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]);
+  // Send message
+  if (!thread) {
+    thread = await channel.threads.create({
+      name,
+      message: {embeds, files},
+      appliedTags: [tag_id]
+    })
+    const starter_msg = await thread.fetchStarterMessage();
+    msg_id_repository.map[msg_id] = starter_msg.id;
+  } else {
+    const bot_msg = await thread.send({
+      embeds: embeds,
+      files: files,
+      ...(replied_bot_msg_id && { reply: replied_bot_msg_id })
+    });
+    msg_id_repository.map[msg_id] = bot_msg.id;
+  }
+  // Update channel name
+  switch (parent_type) {
+    case 0: case 5: case 15:
+      if (`${parent_name}/${channel_name}` !== thread.name) await thread.setName(`${parent_name}/${channel_name}`); break;
+    default:
+      if (channel_name !== thread.name) await thread.setName(channel_name); break;
+  }
+  msg_id_repository.channels[channel_id] = thread.id;
+  // Save to Drive
+  try {
+    await save_to_drive('msg_id_repository');
+    res.status(200).send('Message forwarded to message-relay');
+  } catch (error) {
+    console.error('Error saving to drive:', error);
+    res.status(500).send('Error saving to drive');
+  }
+});
+
+app.post('role-info', async (req, res) => {
+  role_info = req.body
+  res.status(200).send('Role info posted')
+})
 
 // ---Command Processing--- //
 
@@ -129,22 +263,23 @@ client.on('interactionCreate', async interaction => {
         const datamall_keys = {1: datamall_api_key_1, 2: datamall_api_key_2}
         const key_num = interaction.options.getInteger('key_num')
         session.datamall_key = datamall_keys[key_num]
-        await interaction.reply({ content: 'Datamall set to default key.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `Datamall set to default key ${key_num}.`, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'own_key') {
         session.datamall_key = interaction.options.getString('key') ?? datamall_api_key_1;
         await interaction.reply({ content: `Your account key ${session.datamall_key} has been saved.`, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'params') {
         session.year = interaction.options.getInteger('year');
         session.month = String(interaction.options.getInteger('month')).padStart(2, '0');
+        session.source = interaction.options.getString('source') ?? 'datamall';
         session.datamall_date = `${session.year}${session.month}`
-        await interaction.reply({ content: `Datamall parameters updated: ${session.year}/${session.month}`, flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `Datamall parameters updated:\n- Date: ${session.year}/${session.month}\n- Source: ${session.source}`, flags: MessageFlags.Ephemeral });
       }
     } else if (subcommand_group === 'busrouter') {
       if (subcommand === 'params') {
         session.year2 = interaction.options.getInteger('year')
         session.month2 = String(interaction.options.getInteger('month')).padStart(2, '0');
         session.busrouter_date = `${session.year2}${session.month2}`;
-        await interaction.reply({ content: `BusRouter parameters updated: ${session.year2}/${session.month2}`, flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `BusRouter parameters updated:\n- Date: ${session.year2}/${session.month2}`, flags: MessageFlags.Ephemeral });
       }
     } else if (subcommand_group === 'type') {
       if (subcommand === 'by_bus_service') {
@@ -153,12 +288,24 @@ client.on('interactionCreate', async interaction => {
         session.dir = interaction.options.getInteger('direction') ?? 1;
         session.split_svc = interaction.options.getString('split_service') ?? "Full route";
         session.weightage = interaction.options.getBoolean('weightage') ?? false;
-        session.by_bus_svc_params_info = `\nBus service: ${session.svc} ${
+        session.freq = interaction.options.getString('freq') ?? "avg";
+        const freq_names = {
+          avg: "Average",
+          am: "AM Average", 
+          pm: "PM Average",
+          am_peak: "AM Peak",
+          pm_peak: "PM Peak",
+          am_offpeak: "AM Off-peak",
+          pm_offpeak: "PM Off-peak"
+        }
+        session.by_bus_svc_params_info = [`- Bus service: ${session.svc} ${
           (session.split_svc && session.split_svc !== "Full route")
           ? ` ${session.split_svc}`
-          : ""
-        }\nDirection: ${session.dir}`;
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Bus Service" with parameters:' + session.by_bus_svc_params_info, flags: MessageFlags.Ephemeral });
+          : ""}`,
+        `- Direction: ${session.dir}`,
+        `- Service weightage: ${session.weightage}`,
+        `- Frequency type: ${freq_names[session.freq]}`].join('\n');
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Bus Service" with parameters:\n' + session.by_bus_svc_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_mrt_line') {
         session.heatmap_type = "by_mrt_line";
         session.svc = interaction.options.getString('line_1');
@@ -166,39 +313,40 @@ client.on('interactionCreate', async interaction => {
         session.dir = interaction.options.getInteger('direction_1') ?? 1;
         session.dir2 = interaction.options.getInteger('direction_2') ?? session.dir;
         session.weightage = interaction.options.getBoolean('weightage') ?? false;
-        session.by_mrt_line_params_info = `\nMRT/LRT line 1: ${session.svc}\n
-        MRT/LRT line 2: ${session.svc2}\n
-        Direction of line 1: ${session.dir}\n
-        Direction of line 2: ${session.dir2}`;
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By MRT/LRT Line" with parameters:' + session.by_mrt_line_params_info, flags: MessageFlags.Ephemeral });
+        session.freq = interaction.options.getString('freq') ?? "avg";
+        session.by_mrt_line_params_info = [`- MRT/LRT line 1: ${session.svc}`,
+        `- MRT/LRT line 2: ${session.svc2}`,
+        `- Direction of line 1: ${session.dir}`,
+        `- Direction of line 2: ${session.dir2}`].join('\n');
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By MRT/LRT Line" with parameters:\n' + session.by_mrt_line_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stops') {
         session.heatmap_type = "by_specific_stops";
         const ori_stops = interaction.options.getString('origin_stops');
         session.ori_stops = ori_stops.replace(/\s+/g, '').split(',')
         const dst_stops = interaction.options.getString('destination_stops');
         session.dst_stops = dst_stops.replace(/\s+/g, '').split(',')
-        session.by_specific_stops_params_info = `\nOrigin stops: ${session.ori_stops}\nDestination stops: ${session.dst_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific Bus Stops" with parameters:' + session.by_specific_stops_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stops_params_info = `- Origin stops: ${session.ori_stops}\n- Destination stops: ${session.dst_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific Bus Stops" with parameters:\n' + session.by_specific_stops_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stns') {
         session.heatmap_type = "by_specific_stns";
         const ori_stops = interaction.options.getString('origin_stations');
         session.ori_stops = ori_stops.toUpperCase().replace(/\s+/g, '').split(',')
         const dst_stops = interaction.options.getString('destination_stations');
         session.dst_stops = dst_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        session.by_specific_stop_params_info = `\nOrigin stations: ${session.ori_stops}\nDestination stations: ${session.dst_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Stations" with parameters:' + session.by_specific_stns_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stop_params_info = `- Origin stations: ${session.ori_stops}\n- Destination stations: ${session.dst_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Stations" with parameters:\n' + session.by_specific_stns_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stop') {
         session.heatmap_type = "by_specific_stop";
         const ori_stops = interaction.options.getString('stops');
         session.ori_stops = ori_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        session.by_specific_stop_params_info = `\nStops: ${session.ori_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific Bus Stop" with parameters:' + session.by_specific_stop_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stop_params_info = `- Stops: ${session.ori_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific Bus Stop Tap In/Out Volume" with parameters:\n' + session.by_specific_stop_params_info, flags: MessageFlags.Ephemeral });
       } else if (subcommand === 'by_specific_stn') {
         session.heatmap_type = "by_specific_stn";
         const ori_stops = interaction.options.getString('stations');
         session.ori_stops = ori_stops.toUpperCase().replace(/\s+/g, '').split(',')
-        session.by_specific_stn_params_info = `\nStations: ${session.ori_stops}`
-        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Station" with parameters:' + session.by_specific_stn_params_info, flags: MessageFlags.Ephemeral });
+        session.by_specific_stn_params_info = `- Stations: ${session.ori_stops}`
+        await interaction.reply({ content: 'You have selected heatmap generation of type "By Specific MRT/LRT Station Tap In/Out Volume" with parameters:\n' + session.by_specific_stn_params_info, flags: MessageFlags.Ephemeral });
       }
     } else if (subcommand_group === 'stop_names') {
         await interaction.reply({content: 'This does nothing yet for now lah.', flags: MessageFlags.Ephemeral},)
@@ -218,21 +366,25 @@ client.on('interactionCreate', async interaction => {
       
         // Ensure the session property is initialized correctly
         session.time_periods = {};
-        session.time_periods[period] = [time_since, time_until];
+        if (time_since === null || time_until === null) {
+          delete session.time_periods[period]
+        } else {
+          session.time_periods[period] = [time_since, time_until];
+        }
       
         // Formats time as "HH:00"
-        const format_time = (value) => {
+        function format_time(value) {
           return String(value).padStart(2, '0') + ":00";
         };
       
         let time_period_msg = "Your time period filters:\n";
         // Loop over the potential periods (assuming "period1" through "period4")
-        if (session.time_periods !== null) {
+        if (session.time_periods !== null && Object.keys(session.time_periods).length > 0) {
           for (let i = 1; i <= 4; i++) {
             const period_key = `period${i}`;
             const period_num = session.time_periods[period_key];
-            if (period_num && period_num.time_since !== null && period_num.time_until !== null) {
-              time_period_msg += `Period ${i}: from ${format_time(period_num[0])} to ${format_time(period_num[1])}\n`;
+            if (period_num && period_num[0] !== null && period_num[1] !== null) {
+              time_period_msg += `Period ${i}: From ${format_time(period_num[0])} to ${format_time(period_num[1])}\n`;
             }
           }
         } else {
@@ -252,19 +404,39 @@ client.on('interactionCreate', async interaction => {
       }
     else if (subcommand === 'check') {
       const datamall_key = session.datamall_key === datamall_api_key_1 ? 'Using default key 1' : session.datamall_key === datamall_api_key_2 ? 'Using default key 2' : session.datamall_key
+      let formatted_period = {};
+      for (period in session.time_periods) {
+        const hours = session.time_periods[period].map(hour => String(hour).padStart(2, '0') + ":00")
+        formatted_period[period] = `From ${hours.join(' to ')}`
+      }
+      const heatmap_type_names = {
+        by_bus_svc: 'By Bus Service',
+        by_mrt_line: 'By MRT/LRT Line',
+        by_specific_stops: 'By Specific Bus Stops',
+        by_specific_stns: 'By Specific MRT/LRT Stations',
+        by_specific_stop: 'By Specific Bus Stop Tap In/Out volume',
+        by_specific_stns: 'By Specific MRT/LRT Station Tap In/Out Volume'
+      }
       await interaction.reply({ content: `${
         [`Check your params ah, make sure nothing is missing:`,
+          `--- General Settings ---`,
           `- Datamall Key: ${datamall_key}`,
           `- Datamall Date: ${session.year}/${session.month}`,
+          `- Datamall Source: ${session.source}`,
           `- BusRouter Date: ${session.year2}/${session.month2}`,
-          `- Heatmap Type: ${session.heatmap_type}`,
-          `${session[`${[session.heatmap_type]}_params_info`]}`,
-          `- Filters`,
+          `- Heatmap Type: ${heatmap_type_names[session.heatmap_type]}`,
+          `--- Heatmap Type Settings ---`,
+          session[`${[session.heatmap_type]}_params_info`] ? `${session[`${[session.heatmap_type]}_params_info`]}` : "**There isn't any heatmap type defined!**",
+          `--- Filter Settings ---`,
           `${(session.day_type)
-            ? `Day Type: ${session.day_type}\n`: 'Day Type: Combined'}`,
+            ? `- Day Type: ${session.day_type}`: '- Day Type: Combined'}`,
           `${(session.time_periods)
-            ? `Time Periods:\nPeriod 1: ${session.time_periods['period1']}\nPeriod 2: ${session.time_periods['period2']}\nPeriod 3: ${session.time_periods['period3']}\nPeriod 4: ${session.time_periods['period4']}\n`
-            : 'Time Periods: Full Day' }`,
+            ? [`- Time Periods:`,
+              formatted_period?.period1 ? `  - Period 1: ${formatted_period?.['period1']}` : null,
+              formatted_period?.period2 ? `  - Period 2: ${formatted_period?.['period2']}` : null,
+              formatted_period?.period3 ? `  - Period 3: ${formatted_period?.['period3']}` : null,
+              formatted_period?.period4 ? `  - Period 4: ${formatted_period?.['period4']}` : null].filter(c => c !== 'null' && c !== null).join('\n')
+            : '- Time Periods: Full Day' }`,
           // `- Stop names displayed for`,
           // `${(session.heatmap_type === "by_bus_svc" || session.heatmap_type === 'by_mrt_line')
           //   ? `Rows: ${session.rows}\nColumns: ${session.cols}`
@@ -347,7 +519,9 @@ client.on('interactionCreate', async interaction => {
           heatmap_type: session.heatmap_type,
           datamall_date: session.datamall_date,
           busrouter_date: session.busrouter_date,
+          source: session.source,
           svc_weighing: session.weightage,
+          freq: session.freq,
           encoded_account_key
         }
 
@@ -365,12 +539,12 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply({content: response, ephemeral: false});
       } catch (err) {
         console.log('Error in heatmap generation due to ' + err)
-        await interaction.editReply({content: `Somewhere somehow something happened, and you ain't getting your heatmap...\nError: ${err}`, ephemeral: false})
+        await interaction.editReply({content: `Somewhere somehow something happened, and you ain't getting your heatmap...\nError: ${err.stack}`, ephemeral: false})
       }
     }
   }
 
-  // --- Copypasta processing (/copypasta) ---
+  // --- Copypasta Processing (/copypasta) ---
   if (interaction.commandName === 'copypasta') {
     const subcommand = interaction.options.getSubcommand();
     if (subcommand === 'add') {
@@ -404,7 +578,7 @@ client.on('interactionCreate', async interaction => {
           throw err;
         }
       } else {
-        await interaction.reply({content: `"${trigger}" copypasta doesn't exist, try something ele leh...`, ephemeral: false});
+        await interaction.reply({content: `"${trigger}" copypasta doesn't exist, try something else leh...`, ephemeral: false});
       }
     }
   }
@@ -412,7 +586,7 @@ client.on('interactionCreate', async interaction => {
     const trigger = interaction.fields.getTextInputValue('trigger').toLowerCase();
     const reply   = interaction.fields.getTextInputValue('reply');
     if (trigger in copypasta_list.copypastas || used_triggers.includes(trigger)) {
-      await interaction.reply({content: `"${trigger} copypasta is already used, try something ele leh..."`, ephemeral: false});
+      await interaction.reply({content: `"${trigger} copypasta is already used, try something else leh..."`, ephemeral: false});
     } else {
       update_copypastas(trigger, reply, 'add');
       await interaction.reply({content: `"${trigger}" copypasta will now send\n\n"${reply}"`, ephemeral: false});
@@ -510,12 +684,12 @@ client.on('interactionCreate', async interaction => {
           const reset_points = interaction.options.getBoolean('reset_points') ?? true
           guesser_data.settings.monthly_reset = reset_points
           await save_to_drive('points')
-          await interaction.reply({content: `The points for the guesser games will ${reset_points ? '' : 'not'} reset next month.`, flags: MessageFlags.Ephemeral})
+          await interaction.reply({content: `The points for the guesser games will${reset_points ? ' ' : ' not '}reset next month.`, flags: MessageFlags.Ephemeral})
         } else if (subcommand === 'announce_leaderboard') {
           const announce = interaction.options.getBoolean('public_announce') ?? false
           guesser_data.settings.announce_leaderboard = announce
           await save_to_drive('points')
-          await interaction.reply({content: `The leaderboard for the guesser games will ${announce ? '' : 'not'} be announced when command to show leaderboard is ran.`, flags: MessageFlags.Ephemeral})
+          await interaction.reply({content: `The leaderboard for the guesser games will${announce ? ' ' : ' not '}be announced when command to show leaderboard is ran.`, flags: MessageFlags.Ephemeral})
         } else if (subcommand === 'check') {
           let lines = Object.entries(guesser_data.settings).map(([key, val]) => `- ${key}: ${val}`);
           const annc_index = lines.indexOf('announcements')
@@ -546,24 +720,84 @@ client.on('interactionCreate', async interaction => {
       const types = {'bus_geoguessr': 'bus', 'metro_guesser': 'metro', 'hard_metro_guesser': 'metro_hard'}
       const correct_ans = guesser_data.answer[types[subcommand]]
       if (subcommand === "bus_geoguessr") {
-        correct_ans.bus_svc = interaction.options.getString('bus_svc')
-        correct_ans.stop_name = interaction.options.getString('stop_name')
-        correct_ans.location = interaction.options.getString('location')
-        correct_ans.twist = interaction.options.getString('twist')
-        // bus_gueguessr processing here...
-        if ('this is' === 'a placeholder') {
-          await interaction.reply({content: "This does nothing yet leh...", flags: MessageFlags.Ephemeral})
-        } else {
-          await interaction.reply({content: `bus_geoguessr answer has been set to bus ${correct_ans.bus_svc}, bus stop ${correct_ans.stop_name}, location is ${correct_ans.location}, and twist is ${correct_ans.twist}.`, flags: MessageFlags.Ephemeral})
-          await save_to_drive('points')
+        let stop_list = null
+        correct_ans.question_num = interaction.options.getInteger('question_num')
+        correct_ans.accuracy = interaction.options.getString('accuracy') ?? null
+        if (correct_ans.accuracy === 'Bus stop name') stop_list = await (await fetch('https://data.busrouter.sg/v1/stops.json')).json()
+        correct_ans.bus_svc = interaction.options.getString('bus_svc') ?? null
+        correct_ans.road1 = interaction.options.getString('road1') ?? null
+        correct_ans.road2 = interaction.options.getString('road2') ?? null
+        correct_ans.bus_stop_code = interaction.options.getString('bus_stop_code') ?? null
+        correct_ans.accuracy === 'Bus stop name' ? correct_ans.bus_stop_name = stop_list[correct_ans.bus_stop_code][2] : correct_ans.bus_stop_name = null
+        correct_ans.twist_ans = interaction.options.getString('twist_ans') ?? null
+        correct_ans.twist_desc = interaction.options.getString('twist_desc') ?? null
+        correct_ans.difficulty = interaction.options.getString('difficulty') ?? null
+        correct_ans.threshold = interaction.options.getInteger('threshold')/100 ?? 0.7
+        correct_ans.time_period = interaction.options.getInteger('minutes') ?? null
+        correct_ans.timestamp = current_time
+        correct_ans.points = interaction.options.getInteger('points') ?? null
+        correct_ans.guess_count = interaction.options.getInteger('guess_count') ?? 1
+        correct_ans.submitter = interaction.options.getString('submitter') ?? '<@1444181274955747479>'
+        correct_ans.desc = interaction.options.getString('description') ?? [
+          `${correct_ans.question_num} (${correct_ans.difficulty})`,`${correct_ans.accuracy ? `Degree of accuracy: ${correct_ans.accuracy}` : 'There is no specific degree of accuracy this time.'}`,
+          `${correct_ans.road2 ? '2 road names are needed since degree of accuracy requires it. Whichever road the bus was on is **always** the first.' : null}`,
+          `${correct_ans.twist_ans ? `Twist: ${correct_ans.twist_desc}` : null}`
+        ].filter(c => c !== 'null' && c !== null).join('\n\n')
+        if (correct_ans.twist_ans !== null && correct_ans.twist_desc === null) {
+          return await interaction.reply({content: 'Twist answers must come with twist descriptions!', flags: MessageFlags.Ephemeral})
         }
+        correct_ans.guessers = {}
+        const files = await list_files(bus_geoguessr_folder_id)
+        const image_file = files.find(n => [`${correct_ans.question_num}.png`, `${correct_ans.question_num}.jpg`].includes(n.name));
+        const image_file_id = image_file.id ?? null
+        if (!image_file_id) {
+          return await interaction.reply({content: `You do not have an image in the [Bus Geoguessr](https://drive.google.com/drive/folders/1WZUdKz6zW5yrfDsEpbps5NcmKqjCl6ip) folder that is named ${correct_ans.question_num}.png/jpg !`, flags: MessageFlags.Ephemeral})
+        }
+        const image_buffer = await load_from_drive(null, 'image', image_file_id)
+        const image = new AttachmentBuilder(image_buffer, {name: 'image.png'})
+        const channel = await client.channels.fetch(guesser_data.settings.announcements.bus);
+        // const durations = {
+        //     "easy": 15 * 60 * 1000, // 15 min
+        //     "medium": 30 * 60 * 1000, // 30 min
+        //     "hard": 60 * 60 * 1000 // 60 min
+        // };
+        if (correct_ans.difficulty === null) { // && correct_ans.points === null) {
+          return await interaction.reply({content: 'You need to provide the difficulty!', flags: MessageFlags.Ephemeral}) // or the number of points to award! If custom points is used, the default points awarded by the diffucilty **overrides** it.
+        }
+        // if (correct_ans.time_period !== null) {
+        //   correct_ans.time_period = correct_ans.time_period * 60 * 1000
+        // } else {
+        //   correct_ans.time_period = durations[correct_ans.difficulty]
+        // }
+        const msg = [
+          `bus_geoguessr answer has been set to:`,
+          ``,
+          `Accuracy: ${correct_ans.accuracy}`,
+          `Bus serivce: ${correct_ans.bus_svc}`,
+          `Road name 1: "${correct_ans.road1}"`,
+          `Road name 2: "${correct_ans.road2}"`,
+          `Twist answer: ${correct_ans.twist_ans}`,
+          `Twist description: ${correct_ans.twist_desc}`,
+          `Difficulty: ${correct_ans.difficulty}`,
+          // correct_ans.modifier ? `Today's modifier is "${correct_ans.modifier}".` : `There are no modifiers today.`,
+          `Threshold: ${correct_ans.threshold}`,
+          `Guess count: **Unimplemented**`, // ${correct_ans.guess_count}
+          `Time period: **Unimplemented**`, // ${correct_ans.time_period / 60000 } minutes
+          `Points: **Unimplemented**`, // ${correct_ans.points}
+          `Submitter of question: ${correct_ans.submitter}`
+        ].join('\n');
+        await interaction.reply({content: msg, flags: MessageFlags.Ephemeral})
+        await channel.send({content: correct_ans.desc, files: [image]})
+        await save_to_drive('points')
       } else if (subcommand === "metro_guesser") {
         correct_ans.question_num = interaction.options.getInteger('question_num')
         correct_ans.city = interaction.options.getString('city')
+        correct_ans.region = interaction.options.getString('region')
+        correct_ans.transport_mode = interaction.options.getString('mode')
         correct_ans.line1 = interaction.options.getString('line1')
         correct_ans.line2 = interaction.options.getString('line2') ?? null
         correct_ans.consec_length = interaction.options.getInteger('consec_length') ?? 0
-        correct_ans.threshold = 0.01 * interaction.options.getInteger('threshold') ?? 0.7
+        correct_ans.threshold = interaction.options.getInteger('threshold')/100 ?? 0.7
         correct_ans.time_period = interaction.options.getInteger('minutes') ?? null
         correct_ans.guess_count = interaction.options.getInteger('guess_count') ?? 1
         correct_ans.line_col = interaction.options.getString('line_col') ?? null
@@ -577,6 +811,15 @@ client.on('interactionCreate', async interaction => {
         correct_ans.points = interaction.options.getInteger('points') ?? null
         correct_ans.submitter = interaction.options.getString('submitter')
         correct_ans.guessers = {}
+        const files = await list_files(metro_guesser_folder_id)
+        const image_file = files.find(n => [`${correct_ans.question_num}.png`, `${correct_ans.question_num}.jpg`].includes(n.name));
+        const image_file_id = image_file.id ?? null
+        if (!image_file_id) {
+          return await interaction.reply({content: `You do not have an image in the [Metroguesser](https://drive.google.com/drive/folders/1Zy_lRi3AwW_XBoTcjmDjDPzTgM4wZZgR) folder that is named ${correct_ans.question_num}.png/jpg !`, flags: MessageFlags.Ephemeral})
+        }
+        const image_buffer = await load_from_drive(null, 'image', image_file_id)
+        const image = new AttachmentBuilder(image_buffer, {name: 'image.png'})
+        const channel = await client.channels.fetch(guesser_data.settings.announcements.metro);
         if (correct_ans.difficulty === null && correct_ans.points === null) {
           return await interaction.reply({content: 'You need to provide either the difficulty or the number of points to award! If custom points is used, the default points awarded by the difficulty **overrides** it.', flags: MessageFlags.Ephemeral})
         }
@@ -602,24 +845,43 @@ client.on('interactionCreate', async interaction => {
         if (correct_ans.city === null || correct_ans.line1 === null) {
           return await interaction.reply({content: "You need to at least provide the city and the short line name!", flags: MessageFlags.Ephemeral})
         } else {
+          const difficulty_format = {
+            'easy': 'Easy',
+            'normal': 'Normal',
+            'hard': 'Hard'
+          }
+          let accepted_names = 'Short'
+          if (correct_ans.line2) accepted_names += ' and long'
+          if (correct_ans.line2) accepted_names += ' line names'; else accepted_names += ' line name'
+          if (correct_ans.line_col) accepted_names += ', line colour'
           const msg = [
             `metro_guesser answer has been set to:`,
             ``,
-            `City: "${correct_ans.city}"`,
-            `Short line name: "${correct_ans.line1}"`,
-            `Long line name: "${correct_ans.line2}"`,
+            `City: ${correct_ans.city}`,
+            `Short line name: ${correct_ans.line1}`,
+            `Long line name: ${correct_ans.line2}`,
             `Consecutive words: ${correct_ans.consec_length}`,
-            `Line colour: "${correct_ans.line_col}"`,
+            `Line colour: ${correct_ans.line_col}`,
             `Rotation degree: ${correct_ans.degree}`,
-            `Difficulty: "${correct_ans.difficulty}"`,
-            correct_ans.modifier ? `Today's modifier is "${correct_ans.modifier}".` : `There are no modifiers today.`,
+            `Difficulty: ${correct_ans.difficulty}`,
+            correct_ans.modifier ? `Today's modifier is ${correct_ans.modifier}.` : `There are no modifiers today.`,
             `Guess count: ${correct_ans.guess_count}`,
             `Time period: ${correct_ans.time_period / 60000 } minutes`,
             `Points: ${correct_ans.points}`,
-            `Submitter of question: "${correct_ans.submitter}"`
+            `Submitter of question: ${correct_ans.submitter}`
           ].join('\n');
           console.log(msg)
+          const qn_content = [
+            `# Line No. ${correct_ans.question_num}`,
+            `**Difficulty**: ${difficulty_format[correct_ans.difficulty]}`,
+            `**Region**: ${correct_ans.region}`,
+            `**Mode**: ${correct_ans.transport_mode}`,
+            `**Accepted names**: ${accepted_names}`,
+            `**Guesses available**: ${correct_ans.guess_count}\n`,
+            `**Deadline for guess**: <t:${Math.round((correct_ans.timestamp + correct_ans.time_period)/1000)}:R>`
+          ].join('\n')
           await interaction.reply({content: msg, flags: MessageFlags.Ephemeral})
+          await channel.send({content: qn_content, files: [image]})
           await save_to_drive('points')
         }
       } else if (subcommand === "hard_metro_guesser") {
@@ -639,13 +901,11 @@ client.on('interactionCreate', async interaction => {
       if (Object.keys(correct_ans).length === 0) {
         return await interaction.reply({content: `There is currently no set answer to ${subcommand} leh...`, flags: MessageFlags.Ephemeral})
       }
-      if (Object.keys(guessers).includes(wrapped_user_id)) {
-        await interaction.reply({content: 'You already answered correctly liao, answer again for what?', flags: MessageFlags.Ephemeral})
+      if (guessers[wrapped_user_id]?.correct && !['RW'].includes(correct_ans?.modifier)) {
+        return await interaction.reply({content: 'You already answered correctly liao, answer again for what?', flags: MessageFlags.Ephemeral})
       }
       if (!guessers[wrapped_user_id]) {
         guessers[wrapped_user_id] = { guesses: 1 };
-      } else if (!('guesses' in guessers[wrapped_user_id])) {
-        guessers[wrapped_user_id].guesses = 1;
       } else {
         if (guessers[wrapped_user_id].guesses === correct_ans.guess_count) {
           return await interaction.reply({ content: `You had your go at guessing this question liao. You have spent all ${correct_ans.guess_count}, no more guesses for you! Try again next round.`, flags: MessageFlags.Ephemeral });
@@ -653,37 +913,68 @@ client.on('interactionCreate', async interaction => {
           guessers[wrapped_user_id].guesses += 1;
         }
       }
-      if (current_time - correct_ans.timestamp > correct_ans.time_period) {
+      if (correct_ans.time_period && current_time - correct_ans.timestamp > correct_ans.time_period) {
         return await interaction.reply({content: `Aiyoh... the answer submission period has ended liao. You took too long.`, flags: MessageFlags.Ephemeral});
       }
+      if (!guesser_data.users?.[wrapped_user_id]) await new_guesser_profile(wrapped_user_id)
       if (subcommand === "bus_geoguessr") {
-        await interaction.reply({content: 'Answering for bus_geoguessr is not available at the moment leh...', flags: MessageFlags.Ephemeral})
+        await interaction.deferReply({flags: MessageFlags.Ephemeral})
+        const bus_svc = interaction.options.getString('bus_svc') ?? null
+        const road1 = interaction.options.getString('road1') ?? null
+        const road2 = interaction.options.getString('road2') ?? null
+        const bus_stop_code = interaction.options.getString('bus_stop_code') ?? null
+        const bus_stop_name = interaction.options.getString('bus_stop_name') ?? null
+        const twist = interaction.options.getString('twist') ?? null
+        let ans_match_bus_svc, ans_match_road1, ans_match_road2, ans_match_twist, ans_match_stop_name
+        if (correct_ans.bus_svc !== null) ans_match_bus_svc = bus_svc === correct_ans.bus_svc
+        else ans_match_bus_svc = true
+        if (correct_ans.road1 !== null) ans_match_road1 = check_ans(road1, correct_ans.road1, 0, correct_ans.threshold, wrapped_user_id)
+        else ans_match_road1 = true
+        if (correct_ans.road2 !== null) ans_match_road2 = check_ans(road2, correct_ans.road2, 0, correct_ans.threshold, wrapped_user_id)
+        else ans_match_road2 = true
+        if (correct_ans.twist_ans !== null) ans_match_twist = check_ans(twist, correct_ans.twist_ans, 0, correct_ans.threshold, wrapped_user_id)
+        else ans_match_twist = true
+        if (correct_ans.bus_stop_name !== null) ans_match_stop_name = check_ans(bus_stop_name, correct_ans.bus_stop_name, 0, wrapped_user_id)
+        else ans_match_stop_name = true
+        if (ans_match_bus_svc && ans_match_road1 && ans_match_road2 && ans_match_stop_name) {
+          correct_ans.guessers[wrapped_user_id].correct = true
+          assign_attribute('bus', wrapped_user_id, {ans_match_twist})
+          save_to_drive('points')
+          await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter ? `You guessed ${ans_match_twist ? 'both answers' : 'only the main answer'} correctly! Keep up the good work.` : `You cannot answer your own submission! Don't anyhow ah.`}`, flags: MessageFlags.Ephemeral}) // You have been awarded ${points} points. You now have ${user_points + points} points.
+        } else {
+          correct_ans.guessers[wrapped_user_id].correct = false
+          const content = `${wrapped_user_id !== correct_ans.submitter 
+            ? [
+              `Your answers excluding twist are incorrect. Did you use the abbreviated forms for road names? Use the full name of the bus stop.`,
+              bus_svc ? `- Bus service: ${bus_svc}` : null,
+              road1 ? `- Road 1: ${road1}` : null,
+              road2 ? `- Road 2: ${road2}` : null,
+              bus_stop_code ? `- Bus stop code: ${bus_stop_code}` : null,
+              twist ? `- Twist: ${twist}` : null,
+              `You used up ${guessers[wrapped_user_id].guesses} guesses, you have ${correct_ans.guess_count - guessers[wrapped_user_id].guesses} guesses left.`
+            ].filter(c => c !== 'null' && c !== null).join('\n')
+            : `You cannot answer your own submission! Don't anyhow ah.`}`
+          await interaction.editReply({content, flags: MessageFlags.Ephemeral})
+        }
       } else if (subcommand === "metro_guesser") {
         await interaction.deferReply({flags: MessageFlags.Ephemeral})
         const city = interaction.options.getString('city')
         const line = interaction.options.getString('line')
         const degree = interaction.options.getInteger('degree')
-        const points = calc_points('metro', degree, wrapped_user_id)
-        if (correct_ans.line2 !== null) {
-          var ans_match_line2 = check_ans(line, correct_ans.line2, correct_ans.consec_length, correct_ans.threshold, wrapped_user_id)
-        } else {
-          var ans_match_line2 = false
-        }
-        if (correct_ans.line_col !== null) {
-          var ans_match_line_col = check_ans(line, correct_ans.line_col, 0, correct_ans.threshold, wrapped_user_id)
-        } else {
-          var ans_match_line_col = false
-        }
+        let ans_match_line2
+        let ans_match_line_col
+        if (correct_ans.line2 !== null) ans_match_line2 = check_ans(line, correct_ans.line2, correct_ans.consec_length, correct_ans.threshold, wrapped_user_id)
+        else ans_match_line2 = false
+        if (correct_ans.line_col !== null) ans_match_line_col = check_ans(line, correct_ans.line_col, 0, correct_ans.threshold, wrapped_user_id)
+        else ans_match_line_col = false
         if (levenshtein_coefficient(city.toLowerCase(), correct_ans.city.toLowerCase()) >= 0.8 && (check_ans(line, correct_ans.line1, 0, correct_ans.threshold, wrapped_user_id) || ans_match_line2 || ans_match_line_col)) {
-          const user_data = guesser_data.users[wrapped_user_id]?.['metro'];
-          const user_points = user_data?.points ?? 0;
-          if (wrapped_user_id !== correct_ans.submitter) {
-            guessers[wrapped_user_id].attributes.points = points
-            await update_points(wrapped_user_id, types[subcommand], 'plus', points)
-          }
+          correct_ans.guessers[wrapped_user_id].correct = true
+          assign_attribute('bus', wrapped_user_id, {ans_match_twist})
           save_to_drive('points')
-          await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter ? `You guessed correctly! You have been awarded ${points} points. You now have ${user_points + points} points.` : `You cannot answer your own submission! Don't anyhow ah.`}`, flags: MessageFlags.Ephemeral})
+          await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter ? `You guessed correctly! Keep up the good work.` : `You cannot answer your own submission! Don't anyhow ah.`}`, flags: MessageFlags.Ephemeral})
         } else {
+          correct_ans.guessers[wrapped_user_id].correct = false
+          save_to_drive('points')
           await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter 
             ? `One of your input answers is incorrect. Your city is \"${city}\" and your line name/colour is \"${line}\". You used up ${guessers[wrapped_user_id].guesses} guesses, you have ${correct_ans.guess_count - guessers[wrapped_user_id].guesses} guesses left.`
             : `You cannot answer your own submission! Don't anyhow ah.`}`, flags: MessageFlags.Ephemeral})
@@ -691,6 +982,15 @@ client.on('interactionCreate', async interaction => {
       } else if (subcommand === "hard_metro_guesser") {
         await interaction.reply({content: 'Answering for hard metro_guesser is not available at the moment leh...', flags: MessageFlags.Ephemeral})
       }
+    } else if (subcommand === "end_game") {
+      const game_type = interaction.options.getString('game_type')
+      const game_type_names = {
+        bus: "Bus Geoguessr",
+        metro: "Metroguesser",
+        metro_hard: "Hard Metroguesser"
+      }
+      await announce_and_reset_answer(game_type, guesser_data.settings.announcements[game_type])
+      await interaction.reply({content: `A ${game_type_names[game_type]} game has ended.`, flags: MessageFlags.Ephemeral})
     }
   }
 
@@ -713,6 +1013,28 @@ client.on('interactionCreate', async interaction => {
       const text = await res.text()
       await interaction.editReply({content: text, flags: MessageFlags.Ephemeral})
     }
+  }
+
+  // --- REDACTED ---
+  if (interaction.commandName === 'roleinfo') {
+    // Build select menu options
+    const options = role_info.map(role => ({
+      label: role.name,
+      value: Object.keys(role)
+    }));
+
+    const row = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('role_select')
+        .setPlaceholder('Select a role to view info')
+        .addOptions(options)
+    );
+
+    await interaction.reply({
+      content: 'Select a role to see info above',
+      components: [row],
+      flags: MessageFlags.Ephemeral, // only visible to admin
+    });
   }
 });
 
@@ -784,24 +1106,23 @@ client.on('guildMemberRemove', async user => {
   })
 })
 
-async function load_from_drive(file, type) {
-  let requested_file_id = ''
+async function load_from_drive(file, type, file_id) {
   let range = ''
-  if (file === 'copypastas') {requested_file_id = copypastas_file_id}
-  if (file === 'points') {requested_file_id = points_file_id}
-  if (file === 'msg_id_repository') {requested_file_id = msg_id_repository_file_id}
-  if (file === 'amendments') {requested_file_id = amendments_file_id; range = 'Main Sheet!A:I'}
+  if (file === 'copypastas') {file_id = copypastas_file_id}
+  if (file === 'points') {file_id = points_file_id}
+  if (file === 'msg_id_repository') {file_id = msg_id_repository_file_id}
+  if (file === 'amendments') {file_id = amendments_file_id; range = 'Main Sheet!A:I'}
   try {
     // Check for file type.
     if (type === 'spreadsheet') {
       const res = await sheets.spreadsheets.values.get({
-        spreadsheetId: requested_file_id, range
+        spreadsheetId: file_id, range
       });
       return res.data.values;
     } else if (type === 'json') {
       // Request the file content by its file ID.
       const res = await drive.files.get(
-        { fileId: requested_file_id, alt: 'media' },
+        { fileId: file_id, alt: 'media' },
         { responseType: 'stream' }
       );
       let data = '';
@@ -811,6 +1132,12 @@ async function load_from_drive(file, type) {
         res.data.on('error', reject);
       });
       return JSON.parse(data);
+    } else if (type === 'image') {
+      const res = await drive.files.get(
+        { fileId: file_id, alt: 'media' },
+        { responseType: 'arraybuffer' }   // <-- key point
+      );
+      return Buffer.from(res.data);
     }
   } catch (error) {
     throw new Error(`Failed to load ${file} from Google Drive: ` + error.message);
@@ -827,6 +1154,14 @@ async function save_to_drive(file) {
   } if (file === 'msg_id_repository') {
     save_json(msg_id_repository_file_id, msg_id_repository)
   }
+}
+
+async function list_files(id) {
+  const res = await drive.files.list({
+    q: `'${id}' in parents`,
+    fields: 'files(id, name, mimeType)'
+  });
+  return res.data.files;
 }
 
 async function save_json(file_id, raw_data) {
@@ -1045,48 +1380,79 @@ async function new_guesser_profile(user) {
   }
 }
 
-function calc_points(type, degree, user) {
+function assign_attribute(type, user, points_params) {
+  const correct_ans = guesser_data.answer[type];
+  init_guesser_data(user, correct_ans)
+  let ans_attributes = correct_ans.guessers[user].attributes;
+  ans_attributes = new Set(ans_attributes)
+  const modifier = correct_ans?.modifier
+  const correct_scorers = Object.values(correct_ans.guessers)
+  .filter(guesser => guesser.correct)
+  .length;
+  if (type === 'bus') {
+    const ans_match_twist = points_params?.ans_match_twist
+    if (correct_scorers === 1) {
+      ans_attributes.add('first')
+      if (ans_match_twist) ans_attributes.add('twist_correct')
+    } else {
+      ans_attributes.add('normal')
+      if (ans_match_twist) ans_attributes.add('twist_correct')
+    }
+  } else if (type === 'metro') {
+    const degree = points_params?.degree
+    if (correct_scorers === 1) {
+      ans_attributes.add('first')
+    } else {
+      ans_attributes.add('normal')
+    }
+    if (modifier === "RW" && degree != null && correct_ans.degree != null) {
+      if (degree <= Math.round(correct_ans.degree) + 30 && degree >= Math.round(correct_ans.degree) - 30) {
+        ans_attributes.add('RW_10')
+      } else if (degree <= Math.round(correct_ans.degree) + 60 && degree >= Math.round(correct_ans.degree) - 60) {
+        ans_attributes.add('RW_5')
+      } else {
+        ans_attributes.add('normal')
+      }
+    }
+  }
+  correct_ans.guessers[user].attributes = Array.from(ans_attributes);
+}
+
+function calc_points(type, user) {
   const correct_ans = guesser_data.answer[type];
   let points = 0
+  const correct_scorers = Object.values(correct_ans.guessers)
+  .filter(guesser => guesser.correct)
+  .length;
   if (type === 'bus') {
-    // bus_geoguessr points calculation
   } else if (type === 'metro') {
     const difficulty_points = {"easy": 5, "medium": 10, "hard": 20}
-    init_guesser_data(user, correct_ans)
-    var ans_attributes = correct_ans.guessers[user].attributes;
     const modifier = correct_ans.modifier
-    if (correct_ans.difficulty) {
-      points = difficulty_points[correct_ans.difficulty]
-    } else if (typeof(correct_ans.points) === 'number') {
+    if (typeof(correct_ans.points) === 'number') {
       points = correct_ans.points
+    } else if (correct_ans.difficulty) {
+      points = difficulty_points[correct_ans.difficulty]
     }
-    if (Object.keys(correct_ans.guessers).length === 1) {
+    if (correct_scorers === 1) {
       points = points + 5
-      ans_attributes.add('first')
     } else {
 			if (modifier === "NCM") {
 				points = points + 10
-				ans_attributes.add('normal')
 			} else if (modifier === "NSF") {
 				points = points + 5
-				ans_attributes.add('normal')
 			} 
 		}
+    const degree = correct_ans?.degree
 		if (modifier === "RW" && degree !== null && correct_ans.degree !== null) {
-      if (degree <= Math.round(correct_ans.degree) + 30 && degree >= Math.round(correct_ans.degree - 30)) {
+      if (degree <= Math.round(correct_ans.degree) + 30 && degree >= Math.round(correct_ans.degree) - 30) {
         points = points + 10
-        ans_attributes.add('RW_10')
-      } else if (degree <= Math.round(correct_ans.degree) + 60 && degree >= Math.round(correct_ans.degree - 60)) {
+      } else if (degree <= Math.round(correct_ans.degree) + 60 && degree >= Math.round(correct_ans.degree) - 60) {
         points = points + 5
-        ans_attributes.add('RW_5')
-      } else {
-				ans_attributes.add('normal')
-			}
+      }
     }
   } else if (type === 'metro_hard') {
     // Hard metro_guesser points calculation
   }
-  correct_ans.guessers[user].attributes = Array.from(ans_attributes);
   return points
 }
 
@@ -1125,6 +1491,15 @@ function check_ans(input_ans, correct_ans, part_length, thr = 0.7, user) {
   const input_str = input_list.join(' ');
   if (valid_ans.has(input_str)) return true;
 
+  // User guess log.
+  const guess_log = [
+		`===== User Guess =====`,
+		`User: ${user}`,
+		`User input: "${input_ans.toLowerCase()}"`,
+		`Correct answer: "${correct_ans.toLowerCase()}"`,
+		`Consecutive word length: ${part_length}`,
+		`======================`]
+
   // If there is a spelling mistake, then...
   const candidates = Array.from(valid_ans);
 	let coefficients = []
@@ -1136,31 +1511,32 @@ function check_ans(input_ans, correct_ans, part_length, thr = 0.7, user) {
 
   // Word-by-word similarity comparison
   const match_words = best_match_str.split(' ');
-  if (input_list.length !== match_words.length) return false;
+  if (input_list.length !== match_words.length) {
+    console.log(guess_log.join('\n'))
+    return false
+  };
 
   let total_score = 0;
   for (let i = 0; i < input_list.length; i++) {
     const word_score = levenshtein_coefficient(input_list[i], match_words[i]);
     total_score += word_score;
   }
-  // Console log
   const avg_score = total_score / input_list.length;
-  console.log([
-		`===== User Guess =====`,
-		`User: ${user}`,
-		`User input: "${input_ans.toLowerCase()}"`,
-		`Correct answer: "${correct_ans.toLowerCase()}"`,
-		`Average similarity score by word: ${avg_score}`,
-		`Overall similarity score: ${best_match_rating}`,
-		`Consecutive word length: ${part_length}`,
-		`======================`].join(`\n`))
+  guess_log.splice(4, 0, `Average similarity score by word: ${avg_score}`).join('\n')
+  guess_log.splice(5, 0, `Overall similarity score: ${best_match_rating}`).join('\n')
+  console.log(guess_log)
   return avg_score >= thr;
 }
 
 function reset_ans(type) {
   const params = {
-    'bus': ['bus_svc', 'stop_name', 'location', 'twist'],
-    'metro': ['question_num', 'city', 'line1', 'line2', 'consec_length', 'threshold', 'line_col', 'degree', 'difficulty', 'guess_count', 'time_period', 'timestamp', 'modifier', 'points', 'submitter'],
+    'bus': ['question_num', 'accuracy', 'bus_svc', 'road1', 'road2', 'bus_stop_code', 'bus_stop_name', 'twist_ans', 'twist_desc',
+      "difficulty", "threshold", "time_period", "timestamp", "points", "guess_count", "submitter", "desc"
+    ],
+    'metro': [
+      'question_num', 'city', 'region', 'mode', 'line1', 'line2', 'consec_length', 'threshold', 'line_col', 'degree', 'difficulty', 'guess_count', 'time_period', 'timestamp',
+      'modifier', 'points', 'submitter'
+    ],
     'metro_hard': []
   }
   if (type === 'bus' || type === 'metro' || type === 'metro_hard') {
@@ -1186,11 +1562,53 @@ async function announce_and_reset_answer(type, channel_id) {
   const guessers = correct_ans.guessers;
 
   // Award points
-  // for (user of Object.keys(guessers)) {
-  //   await update_points(user, 'metro', 'plus', correct_ans.guessers[user].attributes.points)
-  // }
+  for (user of Object.keys(guessers)) {
+    if (user?.correct) {
+      const points = calc_points(type, user)
+      const user_data = guesser_data.users[user]?.[type];
+      const user_points = user_data?.points ?? 0;
+      if (user !== correct_ans.submitter) {
+        await update_points(user, type, 'plus', points)
+      }
+    }
+  }
 
   if (channel?.isTextBased()) {
+    if (type === 'bus') {
+      // const difficulty_points = {'easy': 5, 'medium': 10, 'hard': 20};
+      let accuracy_ans = null
+      switch (correct_ans.accuracy) {
+        case 'Bus stop code': accuracy_ans = correct_ans.bus_stop_code; break;
+        case 'Bus stop name': accuracy_ans = correct_ans.bus_stop_name; break;
+        case 'Bus service': accuracy_ans = correct_ans.bus_svc; break;
+        case 'Road name': accuracy_ans = correct_ans.road_1; break;
+        case 'Road names at the junction': accuracy_ans = `Junction between ${correct_ans.road1} and ${correct_ans.road2}`
+      }
+      let summary = [
+        `Answer ${correct_ans.question_num}: ${accuracy_ans}`,
+        `${correct_ans.twist_ans ? `Twist: ${correct_ans.twist_ans}` : 'There is no twist this round.'}`
+      ].join('\n\n');
+      // const modifier_bonus_points = {};
+      // summary += `${modifier !== null ? `Modifier today is **${modifier}** (+${modifier_bonus_points[modifier]} pts).` : `No modifiers today.`} Difficulty is **${correct_ans.difficulty}** (${difficulty_points[correct_ans.difficulty]} base points)\n\n`;
+      if (Object.entries(guessers).length === 0) {
+        summary += '\n\n' + 'Nobody guessed, or guessed correctly sia...';
+      } else {
+        const first = users_with_attribute('bus', 'first')[0] ?? null;
+        const normals = new Set(users_with_attribute('bus', 'normal'));
+        const twist_correct = new Set(users_with_attribute('bus', 'twist_correct'));
+        if (first) {
+          if (twist_correct.has(first)) summary += '\n\n' + `First: ${first} (All correct)`;
+          else summary += '\n\n' + `First: ${first} (Correct)`
+        }
+        if (normals.size > 0) {
+          const normal_only = normals.difference(twist_correct)
+          if (normal_only.size > 0) summary += '\n\n' + `Correct:\n${[...normal_only].join('\n')}`;
+          const twist_n_normal = normals.intersection(twist_correct)
+          if (twist_n_normal.size > 0) summary += '\n\n' + `All correct:\n${[...twist_n_normal].join('\n')}`;
+        }
+        await channel.send({content: summary, allowedMentions: {users: []}});
+      }
+    }
     if (type === 'metro') {
       const difficulty_points = {'easy': 5, 'medium': 10, 'hard': 20};
       const pre_line1 = correct_ans.line1?.split(' ') ?? [];
@@ -1249,10 +1667,7 @@ function init_guesser_data(user_id, answer_obj) {
     answer_obj.guessers[user_id] = { attributes: new Set(), guesses: 0 };
   }
   if (!(answer_obj.guessers[user_id].attributes instanceof Set)) {
-    answer_obj.guessers[user_id].attributes = new Set();
-  }
-  if (typeof answer_obj.guessers[user_id].guesses !== 'number') {
-    answer_obj.guessers[user_id].guesses = 0;
+    answer_obj.guessers[user_id].attributes = new Set(answer_obj.guessers[user_id].attributes ?? []);
   }
 }
 
@@ -1347,6 +1762,10 @@ async function update_data_cache() {
       }
     }
   })
+}
+
+function amendments_repo_edit(user, routes, params, rating, link) {
+
 }
 
 async function menu_tab(interaction, user_id) {

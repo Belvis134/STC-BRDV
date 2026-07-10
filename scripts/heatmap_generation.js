@@ -16,12 +16,13 @@ function bar(done, total) {
 }
 
 // Request data (with Google Drive integration planned for Datamall data)
-async function load_data(datamall_date, busrouter_date, encoded_account_key, data_type, data_type2, svc_weighing) {
+async function load_data(datamall_date, busrouter_date, encoded_account_key, data_type, data_type2, svc_weighing, source) {
   const cache_key = `${data_type}_${data_type2}_${datamall_date}`;
   if (['origin_destination', 'specific_stop'].includes(data_type)) {
     var temp_file_path = path.join('C:/R Projects/Websites/Bus-Route-Demand-Visualiser/data/storage/temp',`${cache_key}.zip`);
     var cache_fresh = fs.existsSync(temp_file_path)
-  } else if (['services'].includes(data_type)) {
+  }
+  if (svc_weighing) {
     var temp_file_path_2 = path.join('C:/R Projects/Websites/Bus-Route-Demand-Visualiser/data/storage/temp',`services_info_${datamall_date}.json`);
     var cache_fresh_2 = fs.existsSync(temp_file_path_2)
   }
@@ -37,24 +38,43 @@ async function load_data(datamall_date, busrouter_date, encoded_account_key, dat
   if (cache_fresh) {
     console.log(`Using cached ZIP from temp file: ${temp_file_path}`);
     raw_data.data1 = temp_file_path;  // Now it's a path to the cached file
-    return;
   }
   if (cache_fresh_2) {
     console.log(`Using cached JSON from temp file: ${temp_file_path_2}`);
     raw_data.data4 = temp_file_path_2;  // Now it's a path to the cached file
-    return;
   }
 
-  // Otherwise fetch new ZIP data
-  console.log(`Fetching new Datamall ZIP data for ${cache_key}`);
-  const url = `https://stcraft.myddns.me/datamall-proxy?date=${datamall_date}&account_key=${encoded_account_key}&data_type=${data_type}&data_type2=${data_type2}&format=zip`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const msg = await res.body().text()
-    throw new Error(msg);
+  if (!cache_fresh) {
+    // Otherwise fetch new ZIP data
+    let url = null
+    console.log(`Fetching new Datamall ZIP data for ${cache_key} from ${source}`);
+    if (source === 'datamall') {url = `https://stcraft.myddns.me/datamall-proxy?date=${datamall_date}&account_key=${encoded_account_key}&data_type=${data_type}&data_type2=${data_type2}&format=zip`}
+    else if (source === 'repository') {url = `https://stcraft.myddns.me/repository/datamall?datamall_date=${datamall_date}&data_type=${data_type}&data_type2=${data_type2}&format=zip`};
+    const res = await fetch(url);
+    if (!res.ok) {
+      const msg = await res.body().text()
+      throw new Error(msg);
+    }
+    
+    // Create a writable stream for saving the raw ZIP to a file
+    const temp_file_stream = fs.createWriteStream(temp_file_path, { flags: 'w' });
+
+    // Pipe the fetched ZIP stream to the file
+    res.body.pipe(temp_file_stream);
+
+    // Wait for the file stream to finish writing
+    await new Promise((resolve, reject) => {
+      temp_file_stream.on('finish', resolve);
+      temp_file_stream.on('error', reject);
+    });
+
+    // Now that the file is saved, set raw_data.data1 to the file path
+    raw_data.data1 = temp_file_path;  // The path to the saved ZIP file
+    console.log(`Datamall ZIP ${cache_key} has been written to temp storage.`);
   }
-  if (svc_weighing) {
-    const url_2 = `https://stcraft.myddns.me/datamall-proxy?date=${datamall_date}&account_key=${encoded_account_key}&data_type=services`;
+  if (svc_weighing && !cache_fresh_2) {
+    console.log(`Fetching new Datamall JSON data for services_info_${datamall_date}`);
+    const url_2 = `https://stcraft.myddns.me/datamall-proxy?date=${datamall_date}&account_key=${encoded_account_key}&data_type=services&data_type2=bus`;
     const res_2 = await fetch(url_2);
     if (!res_2.ok) {
       const msg = await res_2.body().text()
@@ -64,23 +84,6 @@ async function load_data(datamall_date, busrouter_date, encoded_account_key, dat
     raw_data.data4 = temp_file_path_2;
     console.log(`Datamall JSON services_info_${datamall_date} has been written to temp storage.`)
   }
-
-  // Create a writable stream for saving the raw ZIP to a file
-  const temp_file_stream = fs.createWriteStream(temp_file_path, { flags: 'w' });
-
-  // Pipe the fetched ZIP stream to the file
-  res.body.pipe(temp_file_stream);
-
-  // Wait for the file stream to finish writing
-  await new Promise((resolve, reject) => {
-    temp_file_stream.on('finish', resolve);
-    temp_file_stream.on('error', reject);
-  });
-
-  // Now that the file is saved, set raw_data.data1 to the file path
-  raw_data.data1 = temp_file_path;  // The path to the saved ZIP file
-
-  console.log(`Datamall ZIP ${cache_key} has been written to temp storage.`);
 }
 
 // Stop code processing (name not added for now)
@@ -137,7 +140,7 @@ async function open_and_filter(filters, interaction) {
   // Open the ZIP
   const directory = await unzipper.Open.file(raw_data.data1); // Unzip and read the file path of data1
   if (filters.svc_weighing) {
-    raw_data.data4 = fs.readFileSync(raw_data.data4) // Read the file path of data4
+    raw_data.data4 = JSON.parse(fs.readFileSync(raw_data.data4)) // Read the file path of data4
   }
   const { heatmap_type } = filters;
   let stop_cur, stop_cur2;
@@ -145,7 +148,7 @@ async function open_and_filter(filters, interaction) {
   if (heatmap_type === 'by_bus_svc' || heatmap_type === 'by_mrt_line') {
     stop_cur = raw_data.data2[filters.service]?.routes?.[filters.direction - 1];
     if (!stop_cur) {
-      console.error(`❌ Could not find route info for service/line ${filters.service}, direction ${filters.direction}`);
+      throw new Error(`❌ Could not find route info for service/line ${filters.service}, direction ${filters.direction}`);
       return [];
     }
 
@@ -153,7 +156,7 @@ async function open_and_filter(filters, interaction) {
     if (heatmap_type === 'by_mrt_line' && filters.service_2) {
       stop_cur2 = raw_data.data2[filters.service_2]?.routes?.[filters.direction_2 - 1] || [];
       if (!stop_cur2) {
-        console.error(`❌ Could not find route info for ${filters.service} line, direction ${filters.direction}`);
+        throw new Error(`❌ Could not find route info for ${filters.service} line, direction ${filters.direction}`);
         return [];
       }
     }
@@ -210,7 +213,7 @@ async function open_and_filter(filters, interaction) {
         })
         .on('end', resolve)
         .on('error', (error) => {
-          console.error('Error unzipping file:', error);
+          throw new Error(`Error unzipping file: ${error}`);
           reject(error);
         });
     });
@@ -266,7 +269,6 @@ function object_of_arrays_to_rows(obj) {
 // --- Service weightage ---
 async function service_weighing(data2, data4, ori, dst, freq_type) {
   const cfm_routes = {};
-  console.log(`Origin: ${ori}, Destination:${dst}`);
 
   for (const svc of Object.keys(data2)) {
     for (const dir_key of Object.keys(data2[svc].routes).map(Number)) {
@@ -319,9 +321,22 @@ async function service_weighing(data2, data4, ori, dst, freq_type) {
         case 'pm_offpeak': freq = freq_list[3]; break;
       }
       cfm_routes[svc][dir].freq = freq;
+      if (freq === 0 || freq === NaN || freq === undefined) delete cfm_routes[svc];
     }
   }
   return cfm_routes;
+}
+
+function find_indexes(arr, value) {
+    if (!Array.isArray(arr)) throw new TypeError("First argument must be an array.");
+    const indexes = [];
+    let current = arr.indexOf(value);
+    // Loop until no more occurrences are found
+    while (current !== -1) {
+      indexes.push(current);
+      current = arr.indexOf(value, current + 1);
+    }
+    return indexes;
 }
 
 // --- Build O-D matrix or Tap In/Out table ---
@@ -343,15 +358,20 @@ async function create_matrix(filtered_data, data, stop_cur, stop_cur2) {
   if (data.svc_weighing) {
     for (const o of origins) {
       for (const d of dests) {
-        const service_info = service_weighing(raw_data.data2, raw_data.data4, origins, dests, data.freq);
+        if (o === d) continue;
+        const dests_indexes = find_indexes(dests, d)
+        for (idx of dests_indexes) {
+          if (origins.indexOf(o) > idx && dests.indexOf(d) !== 0) continue;
+        }
+        const service_info = await service_weighing(raw_data.data2, raw_data.data4, o, d, data.freq);
         let total = 0
         weightage[`${o}_${d}`] = {};
-        if (service_info[data.service]) {
+        for (const svc in service_info) {
           // Since only one dir, just take the first entry
-          const [dir] = Object.keys(service_info[data.service]);
-          const info = service_info[data.service][dir];
+          const [dir] = Object.keys(service_info[svc]);
+          const info = service_info[svc][dir];
           const weight = 1 / ((Number(info.diff_dist) ** 2) * Number(info.freq));
-          weightage[`${o}_${d}`][data.service] = { weight };
+          weightage[`${o}_${d}`][svc] = { weight };
           total += weight;
         }
         weightage[`${o}_${d}`].total = total
@@ -368,7 +388,8 @@ async function create_matrix(filtered_data, data, stop_cur, stop_cur2) {
       const key = `${ori}_${dst}`;
       grouped[key] = (grouped[key] || 0) + (Number(r.TOTAL_TRIPS) || 0);
       if (data.svc_weighing) {
-        grouped[key] = grouped[key] * (weightage[key][data.service].weight / weightage[key].total)
+        grouped[key] = grouped[key] * (weightage?.[key]?.[data.service]?.weight ? (weightage[key][data.service].weight / weightage[key].total) : 1)
+        grouped[key] = Number(grouped[key].toFixed(3))
       }
     }
     const normalised_origins = origins.map(o => apply_comp_mapping(o, compound_map));
@@ -457,21 +478,26 @@ function matrix_to_rows(grid, heatmap_type, service, service_2) {
 }
 
 // Find a user's sheet
-async function find_user_sheet(spreadsheetId, userId) {
+async function find_user_sheet(spreadsheetId, user_id, username) {
   const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
   for (const s of spreadsheet.data.sheets) {
-    const title = s.properties.title;
+    const sheetName = s.properties.title;
+    const sheetId = s.properties.sheetId;
     try {
-      const res = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${title}!C2`,
-      });
-      const cellVal = res.data.values?.[0]?.[0];
-      if (cellVal === userId) {
-        return { sheetId: s.properties.sheetId, sheetName: title };
+      if (sheetName === username) {
+        return {sheetId, sheetName}
+      } else {
+        const res = await sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range: `${sheetName}!C2`,
+        });
+        const cellVal = res.data.values?.[0]?.[0];
+        if (cellVal === user_id) {
+          return {sheetId, sheetName};
+        }
       }
     } catch (err) {
-      // ignore sheets without that cell
+      throw new Error(`${err.message}`);
     }
   }
   return null; // not found
@@ -507,6 +533,8 @@ async function clone_template(spreadsheetId, templateSheetId, username) {
 }
 
 async function delete_sheet(spreadsheetId, sheetId) {
+  if (sheetId === 0) throw new Error('Attempted to delete User Info sheet!')
+  if (sheetId === 1984327592) throw new Error('Attempted to delete Template sheet!')
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
@@ -518,16 +546,18 @@ async function delete_sheet(spreadsheetId, sheetId) {
 }
 
 function write_to_cell(req, metadata, new_sheet_id, param, row, col) {
+  let value_type;
   const value = metadata[param];
+  switch (typeof value) {
+    case 'number': value_type = {numberValue: value}; break
+    case 'string': value_type = {stringValue: String(value)}; break;
+    case 'boolean': value_type = {boolValue: value}; break;
+  }
   req.push({
     updateCells: {
       rows: [{
         values: [{
-          userEnteredValue: (
-            typeof value === 'number'
-              ? { numberValue: value }
-              : { stringValue: String(value) }
-          )
+          userEnteredValue: (value_type)
         }]
       }],
       fields: 'userEnteredValue',
@@ -541,7 +571,7 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
   // 1a. Clone template + rename sheet
   // Check if an existing sheet for the user exists, if not, create new.
   let new_sheet_id, new_sheet_name;
-  const existing = await find_user_sheet(spreadsheetId, metadata.user_id);
+  const existing = await find_user_sheet(spreadsheetId, metadata.user_id, metadata.username);
   if (existing) {
     await delete_sheet(spreadsheetId, existing.sheetId);
     const clone_res = await clone_template(spreadsheetId, templateSheetId, metadata.username);
@@ -555,7 +585,6 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
     console.log(`Created new heatmap sheet for ${metadata.username}`);
   }
   metadata.new_sheet_id = new_sheet_id;
-  metadata.svc_weighing = metadata.service_weighing.toUpperCase()
   // 1b. Some formatting thingies.
   const heatmap_types = {
     "by_bus_svc": "By Bus Service",
@@ -571,7 +600,6 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'username', 0, 2);
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'user_id', 1, 2);
   write_to_cell(metadata_requests, metadata, new_sheet_id, 'heatmap_date', 2, 2);
-  write_to_cell(metadata.requests, metadata, new_sheet_id, 'svc_weighing', 2, 15);
   if (metadata.heatmap_type === 'by_bus_svc' || metadata.heatmap_type === 'by_mrt_line') {
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'service', 0, 7);
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'direction', 1, 7);
@@ -580,17 +608,21 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'service_2', 2, 7);
     write_to_cell(metadata_requests, metadata, new_sheet_id, 'direction_2', 3, 7); 
   }
+  write_to_cell(metadata_requests, metadata, new_sheet_id, 'svc_weighing', 2, 15)
+  write_to_cell(metadata_requests, metadata, new_sheet_id, 'datamall_date', 0, 19)
+  write_to_cell(metadata_requests, metadata, new_sheet_id, 'busrouter_date', 1, 19)
   metadata.heatmap_type = heatmap_types[metadata.heatmap_type]
-  write_to_cell(metadata_requests, metadata, new_sheet_id, 'heatmap_type', 3, 2);
-  if (metadata.day_type_filter) {
-    write_to_cell(metadata_requests, metadata, new_sheet_id, 'day_type_filter', 0, 15);
-  } else {
-    const override = {day_type_filter: "Combined"}
-    write_to_cell(metadata_requests, override, new_sheet_id, 'day_type_filter', 0, 15);
-  }
+  write_to_cell(metadata_requests, metadata, new_sheet_id, 'heatmap_type', 3, 2); // heatmap type
+  const formatted_date_types = {weekday: "Weekday", weekend_ph: "Weekend/Holiday"}
+  const day_type_formatted = metadata.day_type_filter ? {day_type_filter: formatted_date_types[metadata.day_type_filter]} : {day_type_filter: "Combined"}
+  write_to_cell(metadata_requests, day_type_formatted, new_sheet_id, 'day_type_filter', 0, 15); // day type filter
+  console.log(metadata.time_period_filters)
   if (metadata.time_period_filters) {
-    for (let p = 0; p < metadata.time_period_filters.length; p++) {
-      write_to_cell(metadata_requests, metadata, new_sheet_id, `${String(metadata.time_period_filters[p][0]).padStart(2, '0')}:00 to ${String(metadata.time_period_filters[p][1]).padStart(2, '0')}:00`, p, 11);
+    for (let p = 1; p <= (Object.keys(metadata.time_period_filters)).length; p++) {
+      const time_str = `${String(metadata.time_period_filters[`period${p}`][0]).padStart(2, '0')}:00 to ${String(metadata.time_period_filters[`period${p}`][1]).padStart(2, '0')}:00`
+      console.log(time_str)
+      const time_period_formatted = {time: time_str}
+      write_to_cell(metadata_requests, time_period_formatted, new_sheet_id, 'time', p-1 , 11);
     }
   } else {
     const override = {time_period_filters: "Full Day"}
@@ -623,32 +655,26 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
 
 // --- Exported command to run with bot ---
 async function post_heatmap(data, interaction) {
-  interaction.editReply({content: `${bar(0,3)} Loading data.`})
-  const data_types1 = {
-    'by_bus_svc': 'origin_destination',
-    'by_mrt_line': 'origin_destination',
-    'by_specific_stops': 'origin_destination',
-    'by_specific_stns': 'origin_destination',
-    'by_specific_stop': 'specific_stop',
-    'by_specific_stn': 'specific_stop'
+  interaction.editReply({content: `${bar(0,3)} Loading data.`});
+  let data_type; let data_type2;
+  switch (data.heatmap_type) {
+    case 'by_bus_svc':  case 'by_mrt_line': case 'by_specific_stops': case 'by_specific_stns': data_type = 'origin_destination'; break;
+    case 'by_specific_stop': case 'by_specific_stn': data_type = 'specific_stop'; break;
   }
-  const data_types2 = {
-    'by_bus_svc': 'bus',
-    'by_mrt_line': 'train',
-    'by_specific_stops': 'bus',
-    'by_specific_stns': 'train',
-    'by_specific_stop': 'bus',
-    'by_specific_stn': 'train' 
+  switch (data.heatmap_type) {
+    case 'by_bus_svc': case 'by_specific_stops': case 'by_specific_stop': data_type2 = 'bus'; break;
+    case 'by_mrt_line': case 'by_specific_stns': case 'by_specific_stn': data_type2 = 'train'; break;
   }
-  const data_type = data_types1[data.heatmap_type]
-  const data_type2 = data_types2[data.heatmap_type]
-  await load_data(data.datamall_date, data.busrouter_date, data.encoded_account_key, data_type, data_type2);
+  await load_data(data.datamall_date, data.busrouter_date, data.encoded_account_key, data_type, data_type2, data.svc_weighing, data.source);
 
   interaction.editReply({content: `${bar(1,3)} Load data successful. Applying mapping.`})
+  console.log('Ok 1')
   const {filtered_data, stop_cur, stop_cur2} = await open_and_filter(data, interaction)
   // Convert filtered_data object -> array of row objects for create_matrix
+  console.log('Ok 2')
   const filtered_rows = object_of_arrays_to_rows(filtered_data);
   const grid = await create_matrix(filtered_rows, data, stop_cur, stop_cur2);
+  console.log('Ok 3')
 
 	const date = new Date();
 	const formatted_date = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${date.toLocaleString('default',{'hour':'numeric','minute':'numeric','second':'numeric','hour12':false})}`;
