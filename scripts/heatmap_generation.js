@@ -634,11 +634,11 @@ async function write_to_sheet(spreadsheetId, templateSheetId, matrix_values, met
     requestBody: { requests: metadata_requests }
   });
 
-  // 3. Clear old data in the range A6:AT100
-  const rangeToClear = `${new_sheet_name}!${top_left_bound}:${bottom_right_bound}`;
+  // 3. Clear old data in the range specified
+  const range_to_clear = `${new_sheet_name}!${top_left_bound}:${bottom_right_bound}`;
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
-    range: rangeToClear
+    range: range_to_clear
   });
   console.log('Old data cleared.');
 
@@ -668,13 +668,10 @@ async function post_heatmap(data, interaction) {
   await load_data(data.datamall_date, data.busrouter_date, data.encoded_account_key, data_type, data_type2, data.svc_weighing, data.source);
 
   interaction.editReply({content: `${bar(1,3)} Load data successful. Applying mapping.`})
-  console.log('Ok 1')
   const {filtered_data, stop_cur, stop_cur2} = await open_and_filter(data, interaction)
   // Convert filtered_data object -> array of row objects for create_matrix
-  console.log('Ok 2')
   const filtered_rows = object_of_arrays_to_rows(filtered_data);
   const grid = await create_matrix(filtered_rows, data, stop_cur, stop_cur2);
-  console.log('Ok 3')
 
 	const date = new Date();
 	const formatted_date = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${date.toLocaleString('default',{'hour':'numeric','minute':'numeric','second':'numeric','hour12':false})}`;

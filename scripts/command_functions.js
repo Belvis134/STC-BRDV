@@ -3,7 +3,7 @@ const body_parser = require('body-parser');
 const cron = require('node-cron')
 const fs = require('fs')
 const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id, 
-  bus_geoguessr_folder_id, metro_guesser_folder_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
+  spottings_file_id, bus_geoguessr_folder_id, metro_guesser_folder_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
 const {drive, sheets, run_handler} = require('./drive_api_handler.js')
 const {post_heatmap, service_weighing} = require('./heatmap_generation.js')
 const app = express();
@@ -13,15 +13,16 @@ app.listen(discord_port, () => {
 });
 
 const { Client, GatewayIntentBits, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags, 
-  AutoModerationRuleTriggerType, AttachmentBuilder, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, Events} = require('discord.js');
+  AutoModerationRuleTriggerType, AttachmentBuilder, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, Events,
+  Message} = require('discord.js');
 const { format } = require('path');
 const { wrap } = require('module');
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const user_sessions = new Map();
-let copypasta_list = {};
-let guesser_data = {};
+let copypasta_list = {}, guesser_data = {};
 let msg_id_repository = {map: {}, order: [], channels: {}};
 let amendment_data = {amendments:{raw:{},json:{}},users:{}};
+let edit_ref_num = null
 const guesser_settings = {
   monthly_reset: true,
   announce_leaderboard: false,
@@ -32,7 +33,7 @@ const guesser_settings = {
   copypasta_list = await load_from_drive('copypastas', 'json')
   guesser_data = await load_from_drive('points', 'json')
   msg_id_repository = await load_from_drive('msg_id_repository', 'json')
-  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet')
+  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet', null, {range: 'Main Sheet!A:I'})
   amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
   update_recent_amendments()
   for (const [key, val] of Object.entries(guesser_settings)) {
@@ -45,9 +46,8 @@ const guesser_settings = {
   cron.schedule('0 0 1 * *', async () => {
   if (!guesser_data.settings.monthly_reset) return;
   await reset_points(null, 'all', 'all');
-  const current_month = Date().toLocaleString('default', {month: 'short'})
-  const current_year = Date().getFullYear()
-    console.log(`Guesser data has been successfully reset for ${current_month} ${current_year}`);
+  const date = format_date(new Date(), ['MMM', 'yyyy'], ' ')
+    console.log(`Guesser data has been successfully reset for ${date}`);
   }, {
     scheduled: true,
     timezone: 'Asia/Singapore'
@@ -100,137 +100,34 @@ const guesser_settings = {
   }, 1 * 60 * 1000);
 })();
 
-// ---Endpoints--- //
+function format_date(date, order, sep) {
+  let date_str = ''
+  for (const o of order) {
+    if (o === 'yyyy') date_str += date.getFullYear()
+    else if (o === 'yy') date_str += String(date.getFullYear()).slice(2,4)
+    else if (o === 'm') date_str += date.getMonth()
+    else if (o === 'mm') date_str += String(date.getMonth() + 1).padStart(2, '0');
+    else if (o === 'MM') date_str += date.toLocaleString('default', {month: 'short'})
+    else if (o === 'MMM') date_str += date.toLocaleString('default', {month: 'long'})
+    else if (o === 'd') date_str += date.getDate()
+    else if (o === 'dd') date_str += String(date.getDate()).padStart(2, '0');
+    if (sep && order.indexOf(o) !== order.length-1) date_str += sep
+  }
+  return date_str
+}
 
-app.post('/discord/heatmap', async (req, res) => {
-  const { session_id, image_url } = req.body;
-  const server_session = user_sessions.get(session_id);
-  if (!server_session) {
-    res.sendStatus(404);
-    return;
+function format_time(time, order, hour12, sep) {
+  let time_str = ''
+  for (const o of order) {
+    if (o === 'hh') time_str += time.toLocaleString('default', {hour: '2-digit'}).slice(0, 2)
+    if (o === 'HH') time_str += time.toLocaleString('default', {hour: '2-digit', hour12: false})
+    if (o === 'mm') time_str += time.toLocaleString('default', {minute: 'numeric'}).padStart(2, '0')
+    if (o === 'ss') time_str += time.toLocaleString('default', {second: 'numeric'}).padStart(2, '0')
+    if (sep && order.indexOf(o) !== order.length-1) time_str += sep
+    if (hour12 && order.indexOf(o) === order.length-1) time_str += ' ' + time.toLocaleString('default', {hour: '2-digit'}).slice (3, 5).toUpperCase();
   }
-
-  try {
-    // This is your original deferred interaction
-    await server_session.interaction.editReply({
-      content: `<@!${server_session.user_id}>, your heatmap is ready!`,
-      embeds: [{ title: 'Demand Heatmap', image: { url: image_url } }]
-    });
-    user_sessions.delete(session_id);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('Failed to editReply for session', session_id, err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-app.post('/btc-message', async (req, res) => {
-  let replied_bot_msg_id = null;
-  let ref_type = 'normal';
-  let files = [];
-  let embeds = [];
-  let thread;
-  // Params
-  const {sender_name, sender_pfp_url, content, channel_name, channel_id, channel_type, attachments, msg_id, ref_msg_id, ref_channel_id, ref_channel_name, ref_guild_name, 
-    ref_guild_icon, ref_author, ref_author_pfp_url, ref_content, ref_attachments, parent_id, parent_type, parent_name} = req.body;
-  // Guild and channel assignment
-  const guild = await client.guilds.fetch(discord_guild_id);
-  const channel = await guild.channels.fetch(msg_relay_id);
-  // Reply vs Forward
-  if (ref_channel_id) {ref_type = 'reply'} 
-  else if (ref_content) {ref_type = 'forward'}
-  // Attachments
-  if (attachments && attachments.length > 0) {
-    files.push(...attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
-  }
-  if (ref_attachments && ref_attachments.length > 0) {
-    files.push(...ref_attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
-  }
-  // Reply mapping and order
-  if (ref_type === 'reply' && msg_id_repository.map[ref_msg_id]) {
-    replied_bot_msg_id = {
-      messageReference: msg_id_repository.map[ref_msg_id]
-    };
-  } else replied_bot_msg_id = null
-  if (!msg_id_repository.map[msg_id]) {
-    msg_id_repository.order.push(msg_id);
-    if (msg_id_repository.order.length > 200) {
-      const oldest = msg_id_repository.order.shift();
-      delete msg_id_repository.map[oldest];
-    }
-  }
-  // Embed building
-  const embed = new EmbedBuilder()
-    .setDescription(content ? content : ' ')
-    .setAuthor({name: sender_name, iconURL: sender_pfp_url});
-  if (ref_type === 'forward') {
-    const embed_2 = new EmbedBuilder()
-      .setDescription(ref_content ? ref_content : ' ')
-      .setAuthor({name: ref_author, iconURL: ref_author_pfp_url})
-      .setFooter({text: `Forwarded from #${ref_channel_name} in ${ref_guild_name}`, iconURL: ref_guild_icon});
-    embeds.push(embed_2)
-  }
-  embeds.push(embed)
-  // Consider parent and current channel types. Type 4 is category.
-  let tag_id; let name;
-  switch (parent_type) {
-    case 0: case 5: tag_id = '1468615615555047571'; break; // Normal thread
-    case 15: tag_id = '1468615301917708485'; break; // Forum thread
-    case 4: switch (channel_type) {
-      case 0: tag_id = '1468614956105728114'; break; // Text channel
-      case 2: tag_id = '1468819935437525259'; break; // Voice channel
-      case 5: tag_id = '1468798513893740718'; break; // Announcement channel
-    }; break;
-  }
-  switch (parent_type) {
-    case 0: case 5: case 15: name = `${parent_name}/${channel_name}`; break;
-    case 4: name = channel_name; break;
-  }
-  // Active vs Archived
-  const active = await channel.threads.fetchActive();
-  const archived = await channel.threads.fetchArchived();
-  if (!msg_id_repository.channels) msg_id_repository.channels = {}
-  thread = active.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]) 
-        || archived.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]);
-  // Send message
-  if (!thread) {
-    thread = await channel.threads.create({
-      name,
-      message: {embeds, files},
-      appliedTags: [tag_id]
-    })
-    const starter_msg = await thread.fetchStarterMessage();
-    msg_id_repository.map[msg_id] = starter_msg.id;
-  } else {
-    const bot_msg = await thread.send({
-      embeds: embeds,
-      files: files,
-      ...(replied_bot_msg_id && { reply: replied_bot_msg_id })
-    });
-    msg_id_repository.map[msg_id] = bot_msg.id;
-  }
-  // Update channel name
-  switch (parent_type) {
-    case 0: case 5: case 15:
-      if (`${parent_name}/${channel_name}` !== thread.name) await thread.setName(`${parent_name}/${channel_name}`); break;
-    default:
-      if (channel_name !== thread.name) await thread.setName(channel_name); break;
-  }
-  msg_id_repository.channels[channel_id] = thread.id;
-  // Save to Drive
-  try {
-    await save_to_drive('msg_id_repository');
-    res.status(200).send('Message forwarded to message-relay');
-  } catch (error) {
-    console.error('Error saving to drive:', error);
-    res.status(500).send('Error saving to drive');
-  }
-});
-
-app.post('role-info', async (req, res) => {
-  role_info = req.body
-  res.status(200).send('Role info posted')
-})
+  return time_str
+};
 
 // ---Command Processing--- //
 
@@ -372,11 +269,6 @@ client.on('interactionCreate', async interaction => {
           session.time_periods[period] = [time_since, time_until];
         }
       
-        // Formats time as "HH:00"
-        function format_time(value) {
-          return String(value).padStart(2, '0') + ":00";
-        };
-      
         let time_period_msg = "Your time period filters:\n";
         // Loop over the potential periods (assuming "period1" through "period4")
         if (session.time_periods !== null && Object.keys(session.time_periods).length > 0) {
@@ -384,7 +276,7 @@ client.on('interactionCreate', async interaction => {
             const period_key = `period${i}`;
             const period_num = session.time_periods[period_key];
             if (period_num && period_num[0] !== null && period_num[1] !== null) {
-              time_period_msg += `Period ${i}: From ${format_time(period_num[0])} to ${format_time(period_num[1])}\n`;
+              time_period_msg += `Period ${i}: From ${format_time(period_num[0], ['mm'])} to ${format_time(period_num[1], ['mm'])}\n`;
             }
           }
         } else {
@@ -994,6 +886,154 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
+  if (interaction.commandName === 'cameo' || interaction.commandName === 'spotting') {
+    const subcommand_group = interaction.options.getSubcommandGroup();
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === 'add') {
+      const modal = new ModalBuilder()
+      .setCustomId(`add_bus_${interaction.commandName}`)
+      .setTitle(`New bus ${interaction.commandName}`)
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_service')
+            .setLabel('The bus service')
+            .setStyle(TextInputStyle.Short)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('reg_num')
+            .setLabel('The registration plate')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_stop')
+            .setLabel('The bus stop code or name')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('direction')
+            .setLabel('The direction. Put dest bus stop code or name')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_model')
+            .setLabel('The bus model (if reg plate unclear)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        )
+      );
+      return interaction.showModal(modal)
+    } else if (subcommand === 'edit') {
+      edit_ref_num = interaction.options.getString('ref_num')
+      const modal = new ModalBuilder()
+      .setCustomId(`edit_bus_${interaction.commandName}`)
+      .setTitle(`Edit bus ${interaction.commandName}`)
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_service')
+            .setLabel('The bus service')
+            .setStyle(TextInputStyle.Short)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('reg_num')
+            .setLabel('The registration plate')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_stop')
+            .setLabel('The bus stop code or name')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('direction')
+            .setLabel('The direction. Put dest bus stop code or name')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bus_model')
+            .setLabel('The bus model (if reg plate unclear)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+        )
+      );
+      return interaction.showModal(modal)
+    } else if (subcommand === 'delete') {
+      edit_ref_num = interaction.options.getString('ref_num')
+      const ref_num_list = (res.data.values ?? []).map(row => row[0]);
+      const idx = ref_num_list.indexOf(edit_ref_num)
+      if (!idx || !edit_ref_num) return await interaction.reply({content: `Invalid reference number ${edit_ref_num}!`})
+      await sheets.spreadsheets.values.update({
+    
+      })
+    }
+  }
+  if (interaction.isModalSubmit() && (interaction.customId === 'add_bus_cameo' || interaction.customId === 'add_bus_spotting')) {
+    const bus_svc = interaction.fields.getTextInputValue('bus_service')
+    const bus_stop = interaction.fields.getTextInputValue('bus_stop') ?? null
+    const direction = interaction.fields.getTextInputValue('direction') ?? null
+    const reg_num = interaction.fields.getTextInputValue('reg_num') ?? null
+    const bus_model = interaction.fields.getTextInputValue('bus_model') ?? null
+    const type = interaction.customId === 'add_bus_cameo' ? 'cameo' : 'spotting'
+    const type_spr = interaction.customId === 'add_bus_cameo' ? 'Cameos' : 'Spottings'
+    const ref_num = get_ref_num(type, user_id)
+    if (!await check_bus_svc(bus_svc)) return await interaction.reply({content: `There is no such bus service ${bus_svc}!`})
+    const bus_stop_name = await check_bus_stop(bus_stop)
+    if (!bus_stop_name) return await interaction.reply({content: `There is no such bus stop ${bus_stop_name}!`})
+    const report_const_list = [ref_num, bus_svc, reg_num, bus_stop_name, direction, bus_model]
+    await interaction.reply({content: [
+      `Reported a new ${type}!`,
+      `- Bus Service: ${bus_svc}${direction ? ` towards ${direction}` : ''}`,
+      `${reg_num ? `- Registration Number: ${reg_num}` : null}`,
+      `${bus_model ? `- Bus Model: ${bus_model}` : null}`,
+      `${bus_stop ? `- Bus Stop: ${bus_stop}` : null}`,
+      `- Reference Number: ${ref_num}`
+    ].filter(s => s !== null && s !== 'null').join('\n')})
+    await save_spreadsheet_row('append', spottings_file_id, [report_const_list], `${type_spr}!A:F`)
+  } else if (interaction.isModalSubmit() && (interaction.customId === 'edit_bus_cameo' || interaction.customId === 'edit_bus_spotting')) {
+    const bus_svc = interaction.fields.getTextInputValue('bus_service')
+    const bus_stop = interaction.fields.getTextInputValue('bus_stop') ?? null
+    const direction = interaction.fields.getTextInputValue('direction') ?? null
+    const reg_num = interaction.fields.getTextInputValue('reg_num') ?? null
+    const bus_model = interaction.fields.getTextInputValue('bus_model') ?? null
+    const type = interaction.customId === 'edit_bus_cameo' ? 'cameo' : 'spotting'
+    const type_spr = interaction.customId === 'edit_bus_cameo' ? 'Cameos' : 'Spottings'
+    if (!await check_bus_svc(bus_svc)) return await interaction.reply({content: `There is no such bus service ${bus_svc}!`})
+    const bus_stop_name = await check_bus_stop(bus_stop)
+    if (!bus_stop_name) return await interaction.reply({content: `There is no such bus stop ${bus_stop_name}!`})
+    const ref_num_list = (res.data.values ?? []).map(row => row[0]);
+    const idx = ref_num_list.indexOf(edit_ref_num)
+    if (!idx || !edit_ref_num) return await interaction.reply({content: `Invalid reference number ${edit_ref_num}!`})
+    if (user_id.slice(user_id.length-5, user_id.length) !== edit_ref_num.slice(1, 6)) return await interaction.reply({content: `You are not the one who reported this ${type}!`}) 
+    const report_const_list = [edit_ref_num, bus_svc, reg_num, bus_stop_name, direction, bus_model]
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: spottings_file_id,
+      range: `${type_spr}!A:A`
+    })
+    await save_spreadsheet_row('update', spottings_file_id, [report_const_list], `${type_spr}!A${idx+1}`)
+    return await interaction.reply({content: [
+      `Your ${type} with reference number ${edit_ref_num} has been updated!`,
+      `- Bus Service: ${bus_svc}${direction ? ` towards ${direction}` : ''}`,
+      `${reg_num ? `- Registration Number: ${reg_num}` : null}`,
+      `${bus_model ? `- Bus Model: ${bus_model}` : null}`,
+      `${bus_stop ? `- Bus Stop: ${bus_stop}` : null}`
+    ].filter(s => s !== null && s !== 'null').join('\n')})
+  }
+
   // --- Amendment Explorer ---
   if (interaction.commandName === 'amendment') {
     const user_id = interaction.user.id;
@@ -1089,11 +1129,41 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.on('messageCreate', message => {
+client.on('messageCreate', async(message) => {
   if (message.author.bot) return;
   const trigger = message.content.toLowerCase()
   if (trigger in copypasta_list.copypastas) {
     message.channel.send(copypasta_list.copypastas[trigger]);
+  }
+  if (['1092353498814885948', '1093039702824722532'].includes(message.channelId)) {
+    let msg_split = message.content.split(' ')
+    const msg_split_alt = message.content.split('. ')
+    if (![2, 3].includes(msg_split.length) && !message.content.includes('. ')) return
+    if (![2, 3].includes(msg_split.length) && msg_split_alt.length !== 2) return
+    if (msg_split_alt.length === 2) msg_split = msg_split_alt[1].split(' ')
+    let px_length = null, prefix = null, type = null; type_spr = null;
+    if (message.channelId === '1092353498814885948') {type = 'cameo', type_spr = 'Cameos'};
+    if (message.channelId === '1093039702824722532') {type = 'spotting', type_spr = 'Spottings'}
+    const bus_stop = msg_split_alt.length === 2 ? String(msg_split_alt[0]) : msg_split.length === 3 ? String(msg_split[0]) : null
+    const reg_num = msg_split.length === 2 ? String(msg_split[0]) : String(msg_split[1])
+    const bus_svc = msg_split.length === 2 ? String(msg_split[1]) : String(msg_split[2])
+    if (reg_num.slice(0, 2).toUpperCase() === 'SG') {px_length = 2; prefix = 'SG'};
+    if (reg_num.slice(0, 3).toUpperCase() === 'SBS') {px_length = 3; prefix = 'SBS'};
+    if (reg_num.slice(0, 3).toUpperCase() === 'SMB') {px_length = 3; prefix = 'SMB'};
+    if (!px_length) return;
+    const tr_reg_num = reg_num.slice(px_length, reg_num.length)
+    const num = tr_reg_num.slice(0, tr_reg_num.length-1).padStart(4, '0')
+    if (Number(num) < 1 || !Number(num)) return;
+    if (num.length > 4) return;
+    const checksum_info = calc_checksum(reg_num, px_length, prefix)
+    if(!checksum_info[0]) return await message.reply({content: `Your letter checksum is wrong! The correct checksum is ${checksum_info[1]}`, allowedMentions: {users: []}})
+    const ref_num = get_ref_num(type, message.author.id)
+    if (!await check_bus_svc(bus_svc)) return await message.reply({content: `There is no such bus service ${bus_svc}!`, allowedMentions: {users: []}})
+    const bus_stop_name = await check_bus_stop(bus_stop)
+    if (bus_stop && !bus_stop_name) return await message.reply({content: `There is no such bus stop ${bus_stop_name}!`})
+    const report_const_list = [ref_num, bus_svc, reg_num, bus_stop_name, null, null]
+    await save_spreadsheet_row('append', spottings_file_id, [report_const_list], `${type_spr}!A:F`)
+    return await message.reply({content: `Ref num: ${ref_num}`, allowedMentions: {users: []}})
   }
 });
 
@@ -1106,17 +1176,16 @@ client.on('guildMemberRemove', async user => {
   })
 })
 
-async function load_from_drive(file, type, file_id) {
-  let range = ''
+async function load_from_drive(file, type, file_id, other_params) {
   if (file === 'copypastas') {file_id = copypastas_file_id}
   if (file === 'points') {file_id = points_file_id}
   if (file === 'msg_id_repository') {file_id = msg_id_repository_file_id}
-  if (file === 'amendments') {file_id = amendments_file_id; range = 'Main Sheet!A:I'}
+  if (file === 'amendments') {file_id = amendments_file_id}
   try {
     // Check for file type.
     if (type === 'spreadsheet') {
       const res = await sheets.spreadsheets.values.get({
-        spreadsheetId: file_id, range
+        spreadsheetId: file_id, range: other_params.range
       });
       return res.data.values;
     } else if (type === 'json') {
@@ -1150,9 +1219,12 @@ async function save_to_drive(file) {
   } if (file === 'copypastas') {
     save_json(copypastas_file_id, copypasta_list)
   } if (file === 'amendments') {
-    save_spreadsheet(amendments_file_id, amendment_data.amendments)
+    save_spreadsheet(amendments_file_id, amendment_data.amendments, 'Main Sheet!A:I')
   } if (file === 'msg_id_repository') {
     save_json(msg_id_repository_file_id, msg_id_repository)
+  } if (file === 'spottings') {
+    save_spreadsheet(spottings_file_id, spottings.cameo, 'Cameos!A:F')
+    save_spreadsheet(spottings_file_id, spottings.normal, 'Spottings!A:F')
   }
 }
 
@@ -1174,18 +1246,43 @@ async function save_json(file_id, raw_data) {
   });
 }
 
-async function save_spreadsheet(file_id, raw_data) {
+async function save_spreadsheet(file_id, raw_data, range) {
+  let values = []
+  if (file_id === amendments_file_id) {values = [
+    ['Approval', 'Date', 'Contributor', 'Type', 'Service(s)', 'Channel', 'Platform', 'Ref. Number', 'Link'], // Header row
+    ...raw_data.rating.map((_, i) => [
+      raw_data.rating[i], raw_data.date[i], raw_data.user_id[i], raw_data.amendment_type[i], 
+      raw_data.svcs[i], 'N.A.', raw_data.platform[i], raw_data.ref_num[i], raw_data.link[i]] // Data row
+  )]} else if (file_id === spottings_file_id) {values = [
+    ['Ref Num', 'Service', 'Direction', 'Bus Stop', 'Reg Num', 'Bus Model'],
+    ...raw_data.report_num.map((_, i) => [
+      raw_data.ref_num[i], raw_data.bus_svc[i], raw_data.direction[i], raw_data.bus_stop[i], raw_data.reg_num[i], raw_data.bus_model[i]
+    ])
+  ]}
   await sheets.spreadsheets.values.update({
     spreadsheetId: file_id,
-    range: 'Main Sheet!A1:I',
+    range,
     valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [
-        ['Approval', 'Date', 'Contributor', 'Type', 'Service(s)', 'Channel', 'Platform', 'Ref. Number', 'Link'], // Header row
-        [raw_data.rating, raw_data.date, raw_data.user_id, raw_data.amendment_type, raw_data.svcs.join(', '), 'N.A.', raw_data.platform, raw_data.ref_num, raw_data.link] // Data row
-      ]
-    }
+    requestBody: {values}
   });
+}
+
+async function save_spreadsheet_row(opr, file_id, raw_data, range) {
+  if (opr === 'update') {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: file_id,
+      range,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {values: raw_data}
+    })
+  } else if (opr === 'append') {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: file_id,
+      range,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {values: raw_data}
+    })
+  }
 }
 
 async function update_copypastas(trigger, content, mode) {
@@ -1199,6 +1296,56 @@ async function update_copypastas(trigger, content, mode) {
   // 2. Push update back and push update back to Drive
   await save_to_drive('copypastas')
   console.log(`Copypasta updated, ${mode = 'add' ? 'added: ' + trigger : 'removed: ' + trigger}`);
+}
+
+function calc_checksum(reg_num, px_length, prefix) {
+  let prefix_list;
+  const tr_reg_num = reg_num.slice(px_length, reg_num.length)
+  const checksum = tr_reg_num.slice(tr_reg_num.length-1, tr_reg_num.length).toUpperCase()
+  const num = tr_reg_num.slice(0, tr_reg_num.length-1).padStart(4, '0')
+  const num_list = num.split('').map(n => Number(n))
+  switch (prefix) {
+    case 'SG': prefix_list = [19, 7]; break;
+    case 'SBS': prefix_list = [2, 19]; break;
+    case 'SMB': prefix_list = [13, 2]; break;
+  }
+  const comb_list = [...prefix_list, ...num_list]
+  let total = 0
+  for (n in comb_list) {
+    let v = 0;
+    if (n === '0') v = comb_list[0] * 9;
+    if (n === '1' || n === '3') v = comb_list[n] * 4;
+    if (n === '2') v = comb_list[2] * 5;
+    if (n === '4') v = comb_list[4] * 3;
+    if (n === '5') v = comb_list[5] * 2;
+    total = total + v;
+  }
+  const rem = (total % 19)
+  const letters = ['A','Z','Y','X','U','T','S','R','P','M','L','K','J','H','G','E','D','C','B']
+  if (checksum === letters[rem]) return [true]
+  return [false, letters[rem]]
+}
+
+function get_ref_num(type, user_id) {
+  const user_id_comp = user_id.slice(user_id.length-5, user_id.length)
+  const date_comp = format_date(new Date(), ['yyyy', 'mm', 'dd'], '')
+  const time_comp = format_time(new Date(), ['HH', 'mm', 'ss'], false, '')
+  return type.slice(0,1).toUpperCase() + user_id_comp + date_comp + time_comp
+}
+
+async function check_bus_svc(bus_svc) {
+  const svc_res = await (await fetch('https://data.busrouter.sg/v1/services.json')).json()
+  const svc_list = Object.keys(svc_res)
+  return svc_list.includes(bus_svc)
+}
+
+async function check_bus_stop(bus_stop) {
+  let bus_stop_name = null
+  if (Number(bus_stop) && bus_stop.length === 5) {
+    const bus_stop_list = await (await fetch('https://data.busrouter.sg/v1/stops.json')).json()
+    bus_stop_name = bus_stop_list?.[bus_stop][2]
+  } else bus_stop_name = bus_stop
+  return bus_stop_name
 }
 
 async function update_points(user, type, mode, value) {
@@ -1322,7 +1469,7 @@ function check_leaderboard(type) {
 
   // 2. Header for leaderboard msg
   const now = new Date();
-  let leaderboard = `The top-10 ${types[type]} of ${now.toLocaleString('default',{ month:'short', year:'numeric' })}:\n\n`;
+  let leaderboard = `The top-10 ${types[type]} of ${format_date(new Date(), ['MMM', 'yyyy'], ' ')}:\n\n`;
 
   // 3. Determine type of leaderboard, filter and sort accordingly
   let list;
@@ -1623,7 +1770,8 @@ async function announce_and_reset_answer(type, channel_id) {
       let summary = `#${correct_ans.question_num} is the **${correct_ans.city} Line ${line1}**${correct_ans.line2 ? ` or the **${line2} line**` : ''}${correct_ans.line_col ? ` or the **${correct_ans.line_col} line**` : ``}!\n\n`;
       if (correct_ans.degree !== null) summary += `Rotation angle: **${correct_ans.degree}°**\n\n`;
       const modifier_bonus_points = {'NCM': 10, 'NSF': 5};
-      summary += `${modifier !== null ? `Modifier today is **${modifier}** (+${modifier === 'RW' ? '5/10' : `${modifier_bonus_points[modifier]}`} pts).` : `No modifiers today.`} Difficulty is **${correct_ans.difficulty}** (${difficulty_points[correct_ans.difficulty]} base points)\n\n`;
+      summary += `${modifier !== null ? `Modifier today is **${modifier}** (+`+
+      `${modifier === 'RW'? '5/10' : `${modifier_bonus_points[modifier]}`} pts).` : `No modifiers today.`} Difficulty is **${correct_ans.difficulty}** (${difficulty_points[correct_ans.difficulty]} base points)\n\n`;
       if (Object.entries(guessers).length === 0) {
         summary += 'How did no one get this correct sia...';
       } else {
@@ -1730,7 +1878,7 @@ function col_names_to_json(raw) {
 }
 
 async function update_recent_amendments() {
-  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet')
+  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet', null, {range: 'Main Sheet!A:I'})
   amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
   if (!Array.isArray(amendment_data.amendments.json)) {
     amendment_data.amendments.recent = [];

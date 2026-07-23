@@ -1,0 +1,24 @@
+{
+  "name": "spotting",
+  "description": "Reporting of spottings.",
+  "options": [
+    {
+      "type": 1,
+      "name": "add",
+      "description": "Adds a spotting!"
+    },
+    {
+      "type": 1,
+      "name": "edit",
+      "description": "Edits a spotting!",
+      "options": [
+        {
+          "type": 3,
+          "name": "ref_num",
+          "description": "The reference number.",
+          "required": true
+        }
+      ]
+    }
+  ]
+}
