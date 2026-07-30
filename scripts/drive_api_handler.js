@@ -57,5 +57,42 @@ function run_handler() {
 const drive = google.drive({ version: 'v3', auth: OAuth2_client });
 const sheets = google.sheets({ version: 'v4', auth: OAuth2_client });
 
-// 7. Export run handler function and OAuth2 client
-module.exports = {drive, sheets, run_handler, force_refresh};
+// 7. Load from Drive function
+async function load_from_drive(type, file_id, other_params) {
+  try {
+    // Check for file type.
+    if (type === 'spreadsheet') {
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: file_id, range: other_params.range
+      });
+      return res.data.values;
+    } else if (type === 'json') {
+      // Request the file content by its file ID.
+      const res = await drive.files.get(
+        { fileId: file_id, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      let data = '';
+      await new Promise((resolve, reject) => {
+        res.data.on('data', (chunk) => data += chunk.toString('utf8'));
+        res.data.on('end', resolve);
+        res.data.on('error', reject);
+      });
+      return JSON.parse(data);
+    } else if (type === 'image') {
+      const res = await drive.files.get(
+        { fileId: file_id, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      );
+      return Buffer.from(res.data);
+    }
+  } catch (error) {
+    const {data} = await drive.files.get({
+      fileId: file_id, fields: "name"
+    })
+    throw new Error(`Failed to load ${data.name} from Google Drive: ` + error.message);
+  }
+}
+
+// 8. Export
+module.exports = {drive, sheets, run_handler, force_refresh, load_refresh_token, load_from_drive};

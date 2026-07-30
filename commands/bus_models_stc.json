@@ -1,0 +1,13 @@
+{
+  "name": "bus_models",
+  "description": "Search up bus models for spotting or cameo reporting.",
+  "options": [
+    {
+      "type": 3,
+      "name": "model",
+      "description": "Bus model",
+      "required": true,
+      "autocomplete": true
+    }
+  ]
+}

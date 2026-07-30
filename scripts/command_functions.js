@@ -4,8 +4,11 @@ const cron = require('node-cron')
 const fs = require('fs')
 const {token, datamall_api_key_1, discord_port, copypastas_file_id, points_file_id, amendments_file_id, team_id, mg_id, datamall_api_key_2, discord_guild_id, 
   spottings_file_id, bus_geoguessr_folder_id, metro_guesser_folder_id, msg_relay_id, msg_id_repository_file_id} = require('../config.js');
-const {drive, sheets, run_handler} = require('./drive_api_handler.js')
+const {drive, sheets, run_handler, load_from_drive} = require('./drive_api_handler.js')
 const {post_heatmap, service_weighing} = require('./heatmap_generation.js')
+const {format_date, format_time} = require('./date_time_functions')
+const {amendment_main, amendment_buttons, update_recent_amendments} = require('./amendment_explorer')
+const {spotrep_main_embed, spotrep_buttons, spotrep_processes, spotrep_selects, data_rows} = require('./spot_n_report')
 const app = express();
 app.use(body_parser.json());
 app.listen(discord_port, () => {
@@ -17,12 +20,13 @@ const { Client, GatewayIntentBits, ModalBuilder, TextInputBuilder, TextInputStyl
   Message} = require('discord.js');
 const { format } = require('path');
 const { wrap } = require('module');
+const { integrations } = require('googleapis/build/src/apis/integrations/index.js');
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const user_sessions = new Map();
 let copypasta_list = {}, guesser_data = {};
 let msg_id_repository = {map: {}, order: [], channels: {}};
-let amendment_data = {amendments:{raw:{},json:{}},users:{}};
 let edit_ref_num = null
+let spotrep_sessions = {}
 const guesser_settings = {
   monthly_reset: true,
   announce_leaderboard: false,
@@ -30,11 +34,9 @@ const guesser_settings = {
 }
 ;(async function start_handler() {
   await run_handler()
-  copypasta_list = await load_from_drive('copypastas', 'json')
-  guesser_data = await load_from_drive('points', 'json')
-  msg_id_repository = await load_from_drive('msg_id_repository', 'json')
-  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet', null, {range: 'Main Sheet!A:I'})
-  amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
+  copypasta_list = await load_from_drive('json', copypastas_file_id)
+  guesser_data = await load_from_drive('json', points_file_id)
+  msg_id_repository = await load_from_drive('json', msg_id_repository_file_id)
   update_recent_amendments()
   for (const [key, val] of Object.entries(guesser_settings)) {
     if (!(key in guesser_data.settings)) {
@@ -100,40 +102,121 @@ const guesser_settings = {
   }, 1 * 60 * 1000);
 })();
 
-function format_date(date, order, sep) {
-  let date_str = ''
-  for (const o of order) {
-    if (o === 'yyyy') date_str += date.getFullYear()
-    else if (o === 'yy') date_str += String(date.getFullYear()).slice(2,4)
-    else if (o === 'm') date_str += date.getMonth()
-    else if (o === 'mm') date_str += String(date.getMonth() + 1).padStart(2, '0');
-    else if (o === 'MM') date_str += date.toLocaleString('default', {month: 'short'})
-    else if (o === 'MMM') date_str += date.toLocaleString('default', {month: 'long'})
-    else if (o === 'd') date_str += date.getDate()
-    else if (o === 'dd') date_str += String(date.getDate()).padStart(2, '0');
-    if (sep && order.indexOf(o) !== order.length-1) date_str += sep
-  }
-  return date_str
-}
+// --- Endpoints --- //
 
-function format_time(time, order, hour12, sep) {
-  let time_str = ''
-  for (const o of order) {
-    if (o === 'hh') time_str += time.toLocaleString('default', {hour: '2-digit'}).slice(0, 2)
-    if (o === 'HH') time_str += time.toLocaleString('default', {hour: '2-digit', hour12: false})
-    if (o === 'mm') time_str += time.toLocaleString('default', {minute: 'numeric'}).padStart(2, '0')
-    if (o === 'ss') time_str += time.toLocaleString('default', {second: 'numeric'}).padStart(2, '0')
-    if (sep && order.indexOf(o) !== order.length-1) time_str += sep
-    if (hour12 && order.indexOf(o) === order.length-1) time_str += ' ' + time.toLocaleString('default', {hour: '2-digit'}).slice (3, 5).toUpperCase();
+app.post('/btc-message', async (req, res) => {
+  let replied_bot_msg_id = null;
+  let ref_type = 'normal';
+  let files = [];
+  let embeds = [];
+  let thread;
+  // Params
+  const {sender_name, sender_pfp_url, content, channel_name, channel_id, channel_type, attachments, msg_id, ref_msg_id, ref_channel_id, ref_channel_name, ref_guild_name, 
+    ref_guild_icon, ref_author, ref_author_pfp_url, ref_content, ref_attachments, parent_id, parent_type, parent_name} = req.body;
+  // Guild and channel assignment
+  const guild = await client.guilds.fetch(discord_guild_id);
+  const channel = await guild.channels.fetch(msg_relay_id);
+  // Reply vs Forward
+  if (ref_channel_id) {ref_type = 'reply'} 
+  else if (ref_content) {ref_type = 'forward'}
+  // Attachments
+  if (attachments && attachments.length > 0) {
+    files.push(...attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
   }
-  return time_str
-};
+  if (ref_attachments && ref_attachments.length > 0) {
+    files.push(...ref_attachments.map(att => ({ attachment: typeof att === 'string' ? att : att.url })));
+  }
+  // Reply mapping and order
+  if (ref_type === 'reply' && msg_id_repository.map[ref_msg_id]) {
+    replied_bot_msg_id = {
+      messageReference: msg_id_repository.map[ref_msg_id]
+    };
+  } else replied_bot_msg_id = null
+  if (!msg_id_repository.map[msg_id]) {
+    msg_id_repository.order.push(msg_id);
+    if (msg_id_repository.order.length > 200) {
+      const oldest = msg_id_repository.order.shift();
+      delete msg_id_repository.map[oldest];
+    }
+  }
+  // Embed building
+  const embed = new EmbedBuilder()
+    .setDescription(content ? content : ' ')
+    .setAuthor({name: sender_name, iconURL: sender_pfp_url});
+  if (ref_type === 'forward') {
+    const embed_2 = new EmbedBuilder()
+      .setDescription(ref_content ? ref_content : ' ')
+      .setAuthor({name: ref_author, iconURL: ref_author_pfp_url})
+      .setFooter({text: `Forwarded from #${ref_channel_name} in ${ref_guild_name}`, iconURL: ref_guild_icon});
+    embeds.push(embed_2)
+  }
+  embeds.push(embed)
+  // Consider parent and current channel types. Type 4 is category.
+  let tag_id; let name;
+  switch (parent_type) {
+    case 0: case 5: tag_id = '1468615615555047571'; break; // Normal thread
+    case 15: tag_id = '1468615301917708485'; break; // Forum thread
+    case 4: switch (channel_type) {
+      case 0: tag_id = '1468614956105728114'; break; // Text channel
+      case 2: tag_id = '1468819935437525259'; break; // Voice channel
+      case 5: tag_id = '1468798513893740718'; break; // Announcement channel
+    }; break;
+  }
+  switch (parent_type) {
+    case 0: case 5: case 15: `${parent_name}/${channel_name}`; break;
+    case 4: name = channel_name; break;
+  }
+  // Active vs Archived
+  const active = await channel.threads.fetchActive();
+  const archived = await channel.threads.fetchArchived();
+  if (!msg_id_repository.channels) msg_id_repository.channels = {}
+  thread = active.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]) 
+        || archived.threads.find(t => t.id === msg_id_repository.channels?.[channel_id]);
+  // Send message
+  if (!thread) {
+    thread = await channel.threads.create({
+      name,
+      message: {embeds, files},
+      appliedTags: [tag_id]
+    })
+    const starter_msg = await thread.fetchStarterMessage();
+    msg_id_repository.map[msg_id] = starter_msg.id;
+  } else {
+    const bot_msg = await thread.send({
+      embeds: embeds,
+      files: files,
+      ...(replied_bot_msg_id && { reply: replied_bot_msg_id })
+    });
+    msg_id_repository.map[msg_id] = bot_msg.id;
+  }
+  // Update channel name
+  switch (parent_type) {
+    case 0: case 5: case 15:
+      if (`${parent_name}/${channel_name}` !== thread.name) await thread.setName(`${parent_name}/${channel_name}`); break;
+    default:
+      if (channel_name !== thread.name) await thread.setName(channel_name); break;
+  }
+  msg_id_repository.channels[channel_id] = thread.id;
+  // Save to Drive
+  try {
+    await save_to_drive('msg_id_repository');
+    res.status(200).send('Message forwarded to message-relay');
+  } catch (error) {
+    console.error('Error saving to drive:', error);
+    res.status(500).send('Error saving to drive');
+  }
+});
+
+app.post('role-info', async (req, res) => {
+  role_info = req.body
+  res.status(200).send('Role info posted')
+})
 
 // ---Command Processing--- //
 
 // Listen for slash command interactions
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isCommand() && !interaction.isModalSubmit()) return;
+  if (!interaction.isCommand() && !interaction.isAutocomplete() && !interaction.isChatInputCommand()) return;
   const user_id = interaction.user.id; // Get user ID once
 
   // Create or update the user's session
@@ -381,19 +464,8 @@ client.on('interactionCreate', async interaction => {
         await interaction.editReply({content: 'Where is your heatmap type? Key in your heatmap parameters with `/heatmap type` pls.'})
         return
       }
-      try {
-        // // 2. Delete the user_id key
-        // user_sessions.delete(user_id);
-
-        // // 3. Create a session_id
-        // const session_id = `${user_id}-${Date.now()}`;
-        // session.session_id   = session_id;  
-        // session.interaction  = interaction;    
-        // session.user_id      = user_id;       
+      try {  
         session.user_profile = client.users.cache.get(user_id) || await client.users.fetch(user_id)
-
-        // // 4. Re-store the session under the session_id
-        // user_sessions.set(session_id, session);
         // Encrypt Datamall acc key so that special chars appear
         const encoded_account_key = encodeURIComponent(session.datamall_key)
         // Pack the things nicely
@@ -416,18 +488,9 @@ client.on('interactionCreate', async interaction => {
           freq: session.freq,
           encoded_account_key
         }
-
-        // 5. Run the heatmap generator
+        // Run the heatmap generator
         const response = await post_heatmap(data, interaction)
-
-        // 5. POST the session data (Contains all the params like .svc/.date/.cells/.heatmap_type…)
-        // await fetch('https://127.0.0.1/data/discord', {
-        //   method:  'POST',
-        //   headers: { 'Content-Type': 'application/json' },
-        //   body: JSON.stringify(session)
-        // });
-
-        // 6. Reply to user to wait
+        // Reply to user to wait
         return interaction.editReply({content: response, ephemeral: false});
       } catch (err) {
         console.log('Error in heatmap generation due to ' + err)
@@ -472,16 +535,6 @@ client.on('interactionCreate', async interaction => {
       } else {
         await interaction.reply({content: `"${trigger}" copypasta doesn't exist, try something else leh...`, ephemeral: false});
       }
-    }
-  }
-  if (interaction.isModalSubmit() && interaction.customId === 'copypasta') {
-    const trigger = interaction.fields.getTextInputValue('trigger').toLowerCase();
-    const reply   = interaction.fields.getTextInputValue('reply');
-    if (trigger in copypasta_list.copypastas || used_triggers.includes(trigger)) {
-      await interaction.reply({content: `"${trigger} copypasta is already used, try something else leh..."`, ephemeral: false});
-    } else {
-      update_copypastas(trigger, reply, 'add');
-      await interaction.reply({content: `"${trigger}" copypasta will now send\n\n"${reply}"`, ephemeral: false});
     }
   }
 
@@ -645,7 +698,7 @@ client.on('interactionCreate', async interaction => {
         if (!image_file_id) {
           return await interaction.reply({content: `You do not have an image in the [Bus Geoguessr](https://drive.google.com/drive/folders/1WZUdKz6zW5yrfDsEpbps5NcmKqjCl6ip) folder that is named ${correct_ans.question_num}.png/jpg !`, flags: MessageFlags.Ephemeral})
         }
-        const image_buffer = await load_from_drive(null, 'image', image_file_id)
+        const image_buffer = await load_from_drive('image', image_file_id)
         const image = new AttachmentBuilder(image_buffer, {name: 'image.png'})
         const channel = await client.channels.fetch(guesser_data.settings.announcements.bus);
         // const durations = {
@@ -709,7 +762,7 @@ client.on('interactionCreate', async interaction => {
         if (!image_file_id) {
           return await interaction.reply({content: `You do not have an image in the [Metroguesser](https://drive.google.com/drive/folders/1Zy_lRi3AwW_XBoTcjmDjDPzTgM4wZZgR) folder that is named ${correct_ans.question_num}.png/jpg !`, flags: MessageFlags.Ephemeral})
         }
-        const image_buffer = await load_from_drive(null, 'image', image_file_id)
+        const image_buffer = await load_from_drive('image', image_file_id)
         const image = new AttachmentBuilder(image_buffer, {name: 'image.png'})
         const channel = await client.channels.fetch(guesser_data.settings.announcements.metro);
         if (correct_ans.difficulty === null && correct_ans.points === null) {
@@ -832,7 +885,12 @@ client.on('interactionCreate', async interaction => {
           correct_ans.guessers[wrapped_user_id].correct = true
           assign_attribute('bus', wrapped_user_id, {ans_match_twist})
           save_to_drive('points')
-          await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter ? `You guessed ${ans_match_twist ? 'both answers' : 'only the main answer'} correctly! Keep up the good work.` : `You cannot answer your own submission! Don't anyhow ah.`}`, flags: MessageFlags.Ephemeral}) // You have been awarded ${points} points. You now have ${user_points + points} points.
+          await interaction.editReply({content: `${wrapped_user_id !== correct_ans.submitter
+            ? `You guessed ${ans_match_twist
+              ? 'both answers' 
+              : 'only the main answer'} correctly! Keep up the good work.` 
+            : `You cannot answer your own submission! Don't anyhow ah.`
+          }`, flags: MessageFlags.Ephemeral}) // You have been awarded ${points} points. You now have ${user_points + points} points.
         } else {
           correct_ans.guessers[wrapped_user_id].correct = false
           const content = `${wrapped_user_id !== correct_ans.submitter 
@@ -883,6 +941,19 @@ client.on('interactionCreate', async interaction => {
       }
       await announce_and_reset_answer(game_type, guesser_data.settings.announcements[game_type])
       await interaction.reply({content: `A ${game_type_names[game_type]} game has ended.`, flags: MessageFlags.Ephemeral})
+    }
+  }
+  
+  if (interaction.commandName === 'bus_models') {
+    if (interaction.isAutocomplete()) {
+      const focused = interaction.options.getFocused();
+      const results = await search_models(focused);
+      return await interaction.respond(results);
+    } else if (interaction.isChatInputCommand()) {
+      const model = interaction.options.getString('model')
+      if (!data_rows?.[user_id]) return await interaction.reply({content: 'You are not adding a spotting or cameo at the moment!', flags: MessageFlags.Ephemeral})
+      data_rows[user_id][6] = model
+      return await interaction.reply({content: `Selected ${model}`, flags: MessageFlags.Ephemeral})
     }
   }
 
@@ -982,7 +1053,73 @@ client.on('interactionCreate', async interaction => {
       })
     }
   }
-  if (interaction.isModalSubmit() && (interaction.customId === 'add_bus_cameo' || interaction.customId === 'add_bus_spotting')) {
+
+  // --- Amendment Explorer ---
+  if (interaction.commandName === 'amendment') {
+    const user_id = interaction.user.id;
+    await amendment_main(interaction, user_id)
+  }
+
+  if (interaction.commandName === 'spotrep') {
+    const user_id = interaction.user.id;
+    spotrep_sessions[user_id] = [Date.now(), interaction]
+    await spotrep_main_embed(interaction, user_id)
+  }
+
+  // --- STCraft Verification ---
+  if (interaction.commandName === 'verify') {
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === 'minecraft') {
+      await interaction.deferReply({flags: MessageFlags.Ephemeral})
+      const res = await fetch('http://127.0.0.1:32700/stc-verif', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({user_id: user_id, type: 'add'})
+      }) 
+      const text = await res.text()
+      await interaction.editReply({content: text, flags: MessageFlags.Ephemeral})
+    }
+  }
+
+  // --- REDACTED ---
+  // if (interaction.commandName === 'roleinfo') {
+  //   // Build select menu options
+  //   const options = role_info.map(role => ({
+  //     label: role.name,
+  //     value: Object.keys(role)
+  //   }));
+
+  //   const row = new ActionRowBuilder().addComponents(
+  //     new StringSelectMenuBuilder()
+  //       .setCustomId('role_select')
+  //       .setPlaceholder('Select a role to view info')
+  //       .addOptions(options)
+  //   );
+
+  //   await interaction.reply({
+  //     content: 'Select a role to see info above',
+  //     components: [row],
+  //     flags: MessageFlags.Ephemeral, // only visible to admin
+  //   });
+  // }
+});
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isModalSubmit()) return
+  
+  if (interaction.customId === 'copypasta') {
+    const trigger = interaction.fields.getTextInputValue('trigger').toLowerCase();
+    const reply   = interaction.fields.getTextInputValue('reply');
+    if (trigger in copypasta_list.copypastas || used_triggers.includes(trigger)) {
+      await interaction.reply({content: `"${trigger} copypasta is already used, try something else leh..."`, ephemeral: false});
+    } else {
+      update_copypastas(trigger, reply, 'add');
+      await interaction.reply({content: `"${trigger}" copypasta will now send\n\n"${reply}"`, ephemeral: false});
+    }
+  }
+
+  if (interaction.customId === 'add_bus_cameo' || interaction.customId === 'add_bus_spotting') {
+    let bus_stop_name = null;
     const bus_svc = interaction.fields.getTextInputValue('bus_service')
     const bus_stop = interaction.fields.getTextInputValue('bus_stop') ?? null
     const direction = interaction.fields.getTextInputValue('direction') ?? null
@@ -992,8 +1129,8 @@ client.on('interactionCreate', async interaction => {
     const type_spr = interaction.customId === 'add_bus_cameo' ? 'Cameos' : 'Spottings'
     const ref_num = get_ref_num(type, user_id)
     if (!await check_bus_svc(bus_svc)) return await interaction.reply({content: `There is no such bus service ${bus_svc}!`})
-    const bus_stop_name = await check_bus_stop(bus_stop)
-    if (!bus_stop_name) return await interaction.reply({content: `There is no such bus stop ${bus_stop_name}!`})
+    if (bus_stop) bus_stop_name = await check_bus_stop(bus_stop)
+    if (bus_stop && !bus_stop_name) return await interaction.reply({content: `There is no such bus stop ${bus_stop_name}!`})
     const report_const_list = [ref_num, bus_svc, reg_num, bus_stop_name, direction, bus_model]
     await interaction.reply({content: [
       `Reported a new ${type}!`,
@@ -1004,7 +1141,7 @@ client.on('interactionCreate', async interaction => {
       `- Reference Number: ${ref_num}`
     ].filter(s => s !== null && s !== 'null').join('\n')})
     await save_spreadsheet_row('append', spottings_file_id, [report_const_list], `${type_spr}!A:F`)
-  } else if (interaction.isModalSubmit() && (interaction.customId === 'edit_bus_cameo' || interaction.customId === 'edit_bus_spotting')) {
+  } else if (interaction.customId === 'edit_bus_cameo' || interaction.customId === 'edit_bus_spotting') {
     const bus_svc = interaction.fields.getTextInputValue('bus_service')
     const bus_stop = interaction.fields.getTextInputValue('bus_stop') ?? null
     const direction = interaction.fields.getTextInputValue('direction') ?? null
@@ -1033,101 +1170,53 @@ client.on('interactionCreate', async interaction => {
       `${bus_stop ? `- Bus Stop: ${bus_stop}` : null}`
     ].filter(s => s !== null && s !== 'null').join('\n')})
   }
+  
+  if (interaction.customId.includes('spotrep')) {
+    await spotrep_processes(interaction, interaction.user.id, interaction.customId)
+  }
+})
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isButton()) return;
+  const type = interaction.customId.split('_')[0]
+
+  // --- Spot-n-Report ---
+  if (type === 'spotrep') {
+    await spotrep_buttons(interaction)
+  }
 
   // --- Amendment Explorer ---
-  if (interaction.commandName === 'amendment') {
-    const user_id = interaction.user.id;
-    await menu_tab(interaction, user_id)
-  }
-
-  // --- STCraft Verification ---
-  if (interaction.commandName === 'verify') {
-    const subcommand = interaction.options.getSubcommand();
-    if (subcommand === 'minecraft') {
-      await interaction.deferReply({flags: MessageFlags.Ephemeral})
-      const res = await fetch('http://127.0.0.1:32700/stc-verif', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({user_id: user_id, type: 'add'})
-      }) 
-      const text = await res.text()
-      await interaction.editReply({content: text, flags: MessageFlags.Ephemeral})
-    }
-  }
-
-  // --- REDACTED ---
-  if (interaction.commandName === 'roleinfo') {
-    // Build select menu options
-    const options = role_info.map(role => ({
-      label: role.name,
-      value: Object.keys(role)
-    }));
-
-    const row = new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('role_select')
-        .setPlaceholder('Select a role to view info')
-        .addOptions(options)
-    );
-
-    await interaction.reply({
-      content: 'Select a role to see info above',
-      components: [row],
-      flags: MessageFlags.Ephemeral, // only visible to admin
-    });
+  if (type === 'amendment') {
+    await amendment_buttons(interaction)
   }
 });
 
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isButton()) return;
-  const [action, user_id] = interaction.customId.split('_');
+  // --- Role Info --- DOES NOT WORK
+  if (!interaction.isStringSelectMenu()) return
+  if (interaction.customId === 'role_select') {
+    const roleId = interaction.values[0];
+    const role = roles.get(roleId);
 
-  // Lock to the command invoker
-  if (interaction.user.id !== user_id) {
-    return interaction.reply({ content: 'This UI is not yours to use.', flags: MessageFlags.Ephemeral });
-  }
-
-  if (action === 'help') {
-    await interaction.reply({content: '**How to use Amendment Explorer**\n- Search: Find amendments by bus, user, or type.\n- Modify: Edit or delete your own amendments.\n- Repository Link: View the full Google Sheet.', ephemeral: false});
-  }
-
-  if (action === 'search') {
-    // Trigger your search flow here
-  }
-
-  if (action === 'modify') {
-    modify_tab(interaction, user_id)
-  }
-
-  if (action === 'home_search') {
-
-  }
-
-  if (action === 'home_modify') {
-    
-  }
-  if (interaction.isStringSelectMenu()) {
-    if (interaction.customId === 'role_select') {
-      const roleId = interaction.values[0];
-      const role = roles.get(roleId);
-
-      if (!role) {
-        return interaction.update({ content: 'Role not found!', components: [] });
-      }
-
-      // Prepare role info
-      const info = `**${role.name}**\n` +
-                   `Permissions: ${role.permissions.toArray().join(', ') || 'None'}\n` +
-                   `Members: ${role.members.map(m => m.user.username).join(', ') || 'None'}`;
-
-      // Update message above dropdown
-      await interaction.update({
-        content: info,
-        components: interaction.message.components // keep dropdown intact
-      });
+    if (!role) {
+      return interaction.update({ content: 'Role not found!', components: [] });
     }
+
+    // Prepare role info
+    const info = `**${role.name}**\n` +
+                `Permissions: ${role.permissions.toArray().join(', ') || 'None'}\n` +
+                `Members: ${role.members.map(m => m.user.username).join(', ') || 'None'}`;
+
+    // Update message above dropdown
+    await interaction.update({
+      content: info,
+      components: interaction.message.components // keep dropdown intact
+    });
   }
-});
+  if (interaction.customId.includes('spotrep')) {
+    await spotrep_selects(interaction, interaction.user.id, interaction.customId)
+  }
+})
 
 client.on('messageCreate', async(message) => {
   if (message.author.bot) return;
@@ -1176,50 +1265,11 @@ client.on('guildMemberRemove', async user => {
   })
 })
 
-async function load_from_drive(file, type, file_id, other_params) {
-  if (file === 'copypastas') {file_id = copypastas_file_id}
-  if (file === 'points') {file_id = points_file_id}
-  if (file === 'msg_id_repository') {file_id = msg_id_repository_file_id}
-  if (file === 'amendments') {file_id = amendments_file_id}
-  try {
-    // Check for file type.
-    if (type === 'spreadsheet') {
-      const res = await sheets.spreadsheets.values.get({
-        spreadsheetId: file_id, range: other_params.range
-      });
-      return res.data.values;
-    } else if (type === 'json') {
-      // Request the file content by its file ID.
-      const res = await drive.files.get(
-        { fileId: file_id, alt: 'media' },
-        { responseType: 'stream' }
-      );
-      let data = '';
-      await new Promise((resolve, reject) => {
-        res.data.on('data', (chunk) => data += chunk.toString('utf8'));
-        res.data.on('end', resolve);
-        res.data.on('error', reject);
-      });
-      return JSON.parse(data);
-    } else if (type === 'image') {
-      const res = await drive.files.get(
-        { fileId: file_id, alt: 'media' },
-        { responseType: 'arraybuffer' }   // <-- key point
-      );
-      return Buffer.from(res.data);
-    }
-  } catch (error) {
-    throw new Error(`Failed to load ${file} from Google Drive: ` + error.message);
-  }
-}
-
 async function save_to_drive(file) {
   if (file === 'points') {
     save_json(points_file_id, guesser_data)
   } if (file === 'copypastas') {
     save_json(copypastas_file_id, copypasta_list)
-  } if (file === 'amendments') {
-    save_spreadsheet(amendments_file_id, amendment_data.amendments, 'Main Sheet!A:I')
   } if (file === 'msg_id_repository') {
     save_json(msg_id_repository_file_id, msg_id_repository)
   } if (file === 'spottings') {
@@ -1840,60 +1890,43 @@ function levenshtein_coefficient(input_ans, correct_ans) {
   return 1 - (levenshtein_dist/input_ans.length);
 }
 
-function col_names_to_json(raw) {
-  // Skip the first 2 rows (titles/notes), row 3 is headers
-  const headers = raw[2];
-  const dataRows = raw.slice(3);
-
-  // Maps spreadsheet row names to workable JSON parameter names.
-  const json_keys = {
-    'Approval': 'rating',
-    'Date': 'date',
-    'Contributor': 'username',
-    'Type': 'amendment_type',
-    'Service(s)': 'svcs',
-    'Platform': 'platform',
-    'Ref. Number': 'ref_num',
-    'Link': 'link'
-  };
-
-  return dataRows.map(row => {
-    const obj = {};
-    headers.forEach((h, i) => {
-      const key = json_keys[h];
-      if (!key) return; // Skip unmapped columns
-
-      let value = row[i] || '';
-
-      // Normalise types
-      if (key === 'rating') value = value ? Number(value) : null;
-      if (key === 'svcs') value = value ? value.split(',').map(s => s.trim()) : [];
-      if (key === 'amendment_type') value = value ? value.split(',').map(s => s.trim()) : [];
-      if (key === 'date' && value) value = new Date(value).toISOString().split('T')[0];
-
-      obj[key] = typeof value === 'string' ? value.trim() : value;
-    });
-    return obj;
-  });
-}
-
-async function update_recent_amendments() {
-  amendment_data.amendments.raw = await load_from_drive('amendments', 'spreadsheet', null, {range: 'Main Sheet!A:I'})
-  amendment_data.amendments.json = await col_names_to_json(amendment_data.amendments.raw)
-  if (!Array.isArray(amendment_data.amendments.json)) {
-    amendment_data.amendments.recent = [];
-    return;
+function search_models(part) {
+  const bus_models = {
+    'Alexander Dennis Enviro500 2d1s': 'Enviro500 2d1s',
+    'Alexander Dennis Enviro500 3d2s': 'Enviro500 3d2s',
+    'BYD B12DS': 'BYD B12DS',
+    'BYD B70A02': 'BYD B70A02',
+    'BYD BC12A04': 'BYD BC12A04',
+    'BYD C6': 'BYD C6',
+    'BYD K9': 'BYD K9',
+    'CRRC ED12': 'CRRC ED12',
+    'LINKKER LM312': 'LINKKER LM312',
+    'MAN A22 Euro V': 'MAN A22 Euro V',
+    'MAN A22 Euro VI': 'MAN A22 Euro VI',
+    'MAN A24': 'MAN A24',
+    'MAN A95 Euro V 2d1s': 'MAN A95 Euro V 2d1s',
+    'MAN A95 Euro VI 2d1s': 'MAN A95 Euro VI 2d1s',
+    'MAN A95 Euro V 3d2s': 'MAN A95 Euro V 3d2s',
+    'MAN A95 Euro VI 3d2s': 'MAN A95 Euro VI 3d2s',
+    'Mercedes-Benz Citaro': 'Mercedes-Benz Citaro',
+    'Mercedes-Benz OC500LE': 'Mercedes-Benz OC500LE',
+    'Scania K230UB': 'Scania K230UB',
+    'Scania K310UD': 'Scania K310UD',
+    'Volvo B5LH': 'Volvo B5LH',
+    'Volvo B9TL Gemilang': 'Volvo B9TL Gemilang',
+    'Volvo B9TL Wright': 'Volvo B9TL Wright',
+    'Yutong E12 SD': 'Yutong E12 SD',
+    'Yutong E12 DD': 'Yutong E12 DD',
+    'Zhongtong LCK6126EVGS': 'Zhongtong LCK6126EVGS',
+    'Zhongtong N12': 'Zhongtong N12'
   }
-
-  // Sort by date descending
-  const sorted = [...amendment_data.amendments.json].sort((a, b) => {
-    const da = new Date(a.date);
-    const db = new Date(b.date);
-    return db - da;
-  });
-
-  // Take top 10
-  amendment_data.amendments.recent = sorted.slice(0, 10);
+  return Object.keys(bus_models)
+    .filter(m => m.toLowerCase().includes(part.toLowerCase()))
+    .slice(0, 25)
+    .map(m => ({
+      name: m,
+      value: bus_models[m] 
+    }))
 }
 
 async function update_data_cache() {
@@ -1912,99 +1945,15 @@ async function update_data_cache() {
   })
 }
 
-function amendments_repo_edit(user, routes, params, rating, link) {
-
-}
-
-async function menu_tab(interaction, user_id) {
-  const user_info = amendment_data.users?.[user_id] ?? { total: 0, big: 0 };
-  const amendments = amendment_data.amendments
-
-  const recent = (amendments.json || [])
-    .filter(a => a.recent)
-    .slice(0, 10)
-    .map(a => `• **${a.amendment_type}** on ${a.svcs.join(', ')} by <@${a.user_id}> (${a.date})`)
-    .join('\n') || 'No recent activity.';
-
-  const embed = new EmbedBuilder()
-    .setTitle('🚌 Amendment Explorer')
-    .setDescription(`Welcome to the Amendment Explorer!`)
-    .addFields(
-      { name: 'Your Stats', value: `Total amendments: **${user_info.total}**\nBig amendments: **${user_info.big}**`, inline: true },
-      { name: 'Recent Activity', value: recent }
-    )
-    .setFooter({ text: 'Use the buttons below to navigate.' });
-
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`help_${user_id}`)
-      .setLabel('Help')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`search_${user_id}`)
-      .setLabel('Search Amendments')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`modify_${user_id}`)
-      .setLabel('Modify Amendments')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setLabel('Repository Link')
-      .setStyle(ButtonStyle.Link)
-      .setURL('https://docs.google.com/spreadsheets/d/1_eQ17i1LbnkGAaZHopSMwsOQCBVVhsper0gwyV132uU/edit')
-  );
-  await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: false });
-}
-
-async function modify_tab(interaction, user_id) {
-  // Filter amendments belonging to this user
-  const user_amendments = amendment_data.amendments.filter(a => a.user_id === user_id);
-
-  const embed = new EmbedBuilder()
-    .setTitle('📝 Modify Your Amendments')
-    .setDescription(user_amendments.length 
-      ? 'Select one of your amendments from the dropdown below.'
-      : 'You have no amendments yet. Use **Add** to create one.');
-
-  // Dropdown menu
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`amendment_select_${user_id}`)
-    .setPlaceholder('Select an amendment')
-    .addOptions(
-      user_amendments.map((a, idx) => ({
-        label: `${a.svcs.join(', ')} — ${a.amendment_type}`,
-        description: `Submitted on ${a.date}`,
-        value: String(idx) // Index in amendment_data.amendments
-      }))
-    );
-
-  // Buttons
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`menu_${user_id}`)
-      .setLabel('Back to Menu')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`add_${user_id}`)
-      .setLabel('Add')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`modify_${user_id}`)
-      .setLabel('Modify')
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(user_amendments.length === 0), // Disable if nothing to modify
-    new ButtonBuilder()
-      .setCustomId(`remove_${user_id}`)
-      .setLabel('Remove')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(user_amendments.length === 0)
-  );
-
-  const components = [];
-  if (user_amendments.length > 0) components.push(new ActionRowBuilder().addComponents(menu));
-  components.push(buttons);
-
-  await interaction.update({ embeds: [embed], components, flags: MessageFlags.Ephemeral });
+async function del_session() {
+  if ((Object.keys(spotrep_sessions)).length === 0) return
+  for (user in spotrep_sessions) {
+    const [timestamp, interaction] = spotrep_sessions[user]
+    if (Date.now() - timestamp >= 5 * 60 * 1000) {
+      await interaction.deleteReply()
+      return delete data_rows[user]
+    }
+  }
 }
 
 client.login(token);
@@ -2024,7 +1973,8 @@ process.on('SIGTERM', () => {
 });
 
 // Keeps the Discord bot alive.
-setInterval(() => {
+setInterval(async () => {
   update_recent_amendments();
   update_data_cache();
+  await del_session()
 }, 120000)
